@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project.case_name }} - Reply Brief Drafter</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 30px 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            font-size: 1.8em;
+            background: linear-gradient(90deg, #ff6b6b, #ffa500);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .back-link {
+            color: #888;
+            text-decoration: none;
+        }
+        .back-link:hover { color: #fff; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 30px;
+        }
+        .sidebar { }
+        .main { }
+
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 20px;
+        }
+        .card h3 {
+            margin-bottom: 15px;
+            color: #ccc;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .upload-zone {
+            border: 2px dashed rgba(255,255,255,0.2);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 10px;
+        }
+        .upload-zone:hover {
+            border-color: #ff6b6b;
+            background: rgba(255,107,107,0.1);
+        }
+        .upload-zone input { display: none; }
+        .upload-zone .icon { font-size: 24px; margin-bottom: 8px; }
+        .upload-zone .label { font-size: 0.9em; color: #aaa; }
+
+        .doc-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            background: rgba(0,255,136,0.1);
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        .doc-item .name { color: #00ff88; }
+        .doc-item .size { color: #666; }
+
+        .btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+            margin-bottom: 10px;
+        }
+        .btn-primary {
+            background: linear-gradient(90deg, #ff6b6b, #ffa500);
+            color: #000;
+        }
+        .btn-secondary {
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .btn:hover { transform: translateY(-1px); }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .argument-list {
+            margin-top: 15px;
+        }
+        .argument-item {
+            padding: 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid #ff6b6b;
+        }
+        .argument-item .title {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+        .argument-item .summary {
+            font-size: 0.85em;
+            color: #aaa;
+            margin-bottom: 8px;
+        }
+        .argument-item .actions {
+            display: flex;
+            gap: 8px;
+        }
+        .argument-item .btn {
+            width: auto;
+            padding: 6px 12px;
+            font-size: 12px;
+            margin: 0;
+        }
+
+        .draft-area {
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 400px;
+            white-space: pre-wrap;
+            font-family: 'Georgia', serif;
+            line-height: 1.8;
+            font-size: 14px;
+        }
+        .draft-area.empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+        }
+
+        .status-bar {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+        }
+        .status-item {
+            text-align: center;
+        }
+        .status-item .value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .status-item .label {
+            font-size: 0.8em;
+            color: #666;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #888;
+        }
+        .loading.show { display: block; }
+
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <a href="/" class="back-link">&larr; All Projects</a>
+                <h1>{{ project.case_name }}</h1>
+            </div>
+            <div style="text-align: right; color: #888; font-size: 0.9em;">
+                <div>{{ project.court }}</div>
+                <div>Docket: {{ project.docket_number }}</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="sidebar">
+                <!-- Upload Section -->
+                <div class="card">
+                    <h3>1. Upload Documents</h3>
+
+                    <div class="upload-zone" data-type="opening_brief">
+                        <input type="file" accept=".pdf,.docx,.txt">
+                        <div class="icon">📄</div>
+                        <div class="label">Opening Brief (Your Brief)</div>
+                    </div>
+                    <div id="doc-opening_brief"></div>
+
+                    <div class="upload-zone" data-type="respondent_brief">
+                        <input type="file" accept=".pdf,.docx,.txt">
+                        <div class="icon">📄</div>
+                        <div class="label">Respondent's Brief</div>
+                    </div>
+                    <div id="doc-respondent_brief"></div>
+
+                    <div class="upload-zone" data-type="appellant_appendix">
+                        <input type="file" accept=".pdf,.docx,.txt">
+                        <div class="icon">📑</div>
+                        <div class="label">Appellant's Appendix</div>
+                    </div>
+                    <div id="doc-appellant_appendix"></div>
+
+                    <!-- Custom Documents Section -->
+                    <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1);">
+                        <h4 style="color: #888; font-size: 0.85em; margin-bottom: 10px;">ADD ADDITIONAL DOCUMENTS</h4>
+                        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                            <select id="customDocType" style="flex: 1; padding: 8px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); color: #fff;">
+                                <option value="record_vol_1">Record Vol. 1</option>
+                                <option value="record_vol_2">Record Vol. 2</option>
+                                <option value="record_vol_3">Record Vol. 3</option>
+                                <option value="record_vol_4">Record Vol. 4</option>
+                                <option value="record_vol_5">Record Vol. 5</option>
+                                <option value="respondent_appendix">Respondent's Appendix</option>
+                                <option value="legal_research">Legal Research</option>
+                                <option value="other">Other Document</option>
+                            </select>
+                            <label class="btn btn-secondary" style="margin: 0; padding: 8px 16px; cursor: pointer;">
+                                Upload
+                                <input type="file" id="customFileInput" accept=".pdf,.docx,.txt" style="display: none;">
+                            </label>
+                        </div>
+                        <div id="customDocsList"></div>
+                    </div>
+                </div>
+
+                <!-- Analysis Section -->
+                <div class="card">
+                    <h3>2. Analyze Arguments</h3>
+                    <button class="btn btn-primary" id="analyzeBtn" onclick="analyzeArguments()">
+                        Analyze Both Briefs
+                    </button>
+                    <div class="loading" id="analyzeLoading">Analyzing arguments...</div>
+                    <div class="argument-list" id="argumentList"></div>
+                </div>
+
+                <!-- Generate Section -->
+                <div class="card">
+                    <h3>4. Generate Brief</h3>
+                    <button class="btn btn-primary" onclick="generateBrief()">
+                        Generate Word Document
+                    </button>
+                    <a href="/project/{{ project.id }}/download" class="btn btn-secondary" style="display: block; text-align: center; text-decoration: none; margin-top: 10px;">
+                        Download Brief
+                    </a>
+                </div>
+            </div>
+
+            <div class="main">
+                <div class="card">
+                    <h3>3. Draft Brief</h3>
+                    <button class="btn btn-primary" onclick="draftEntireBrief()" style="margin-bottom: 15px;">
+                        Draft Entire Reply Brief
+                    </button>
+                    <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                        <button class="btn btn-secondary" onclick="draftSection('intro')">Draft Intro Only</button>
+                        <button class="btn btn-secondary" onclick="draftSection('conclusion')">Draft Conclusion Only</button>
+                    </div>
+                    <div class="loading" id="draftLoading">Drafting section...</div>
+                    <div class="draft-area empty" id="draftArea">
+                        Select a section to draft, or click "Draft Response" on an argument point.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const projectId = "{{ project.id }}";
+
+        // Load existing documents
+        async function loadDocuments() {
+            try {
+                const response = await fetch(`/project/${projectId}/documents`);
+                const data = await response.json();
+
+                const customDocs = [];
+                data.documents.forEach(doc => {
+                    const container = document.getElementById(`doc-${doc.type}`);
+                    if (container) {
+                        container.innerHTML = `
+                            <div class="doc-item">
+                                <span class="name">${doc.filename}</span>
+                                <span class="size">${Math.round(doc.char_count/1000)}K chars</span>
+                            </div>
+                        `;
+                    } else {
+                        // Custom document - add to list
+                        customDocs.push(doc);
+                    }
+                });
+
+                // Show custom documents
+                if (customDocs.length > 0) {
+                    const customList = document.getElementById('customDocsList');
+                    customDocs.forEach(doc => {
+                        const label = doc.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                        customList.innerHTML += `
+                            <div class="doc-item">
+                                <span class="name">${label}: ${doc.filename}</span>
+                                <span class="size">${Math.round(doc.char_count/1000)}K chars</span>
+                            </div>
+                        `;
+                    });
+                }
+            } catch (e) {
+                console.error('Error loading documents:', e);
+            }
+        }
+
+        // Setup upload zones
+        document.querySelectorAll('.upload-zone').forEach(zone => {
+            const input = zone.querySelector('input');
+            const docType = zone.dataset.type;
+
+            zone.addEventListener('click', () => input.click());
+
+            input.addEventListener('change', async (e) => {
+                if (e.target.files.length === 0) return;
+
+                const file = e.target.files[0];
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('doc_type', docType);
+
+                zone.style.opacity = '0.5';
+                zone.querySelector('.label').textContent = 'Uploading...';
+
+                try {
+                    const response = await fetch(`/project/${projectId}/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        const container = document.getElementById(`doc-${docType}`);
+                        container.innerHTML = `
+                            <div class="doc-item">
+                                <span class="name">${result.filename}</span>
+                                <span class="size">${Math.round(result.char_count/1000)}K chars</span>
+                            </div>
+                        `;
+                    } else {
+                        alert('Upload failed: ' + result.error);
+                    }
+                } catch (error) {
+                    alert('Upload error: ' + error.message);
+                } finally {
+                    zone.style.opacity = '1';
+                    zone.querySelector('.label').textContent = zone.querySelector('.label').textContent.replace('Uploading...', docType.replace('_', ' '));
+                }
+            });
+        });
+
+        // Analyze arguments
+        async function analyzeArguments() {
+            const btn = document.getElementById('analyzeBtn');
+            const loading = document.getElementById('analyzeLoading');
+            const list = document.getElementById('argumentList');
+
+            btn.disabled = true;
+            loading.classList.add('show');
+
+            try {
+                const response = await fetch(`/project/${projectId}/analyze`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+
+                list.innerHTML = '';
+                (data.arguments || []).forEach((arg, i) => {
+                    list.innerHTML += `
+                        <div class="argument-item">
+                            <div class="title">Point ${arg.number || i+1}: ${arg.title}</div>
+                            <div class="summary" style="margin-bottom: 5px;"><strong>You argued:</strong> ${arg.appellant_argument || arg.summary || ''}</div>
+                            <div class="summary"><strong>They counter:</strong> ${arg.respondent_counter || ''}</div>
+                            <div class="summary" style="color: #ff6b6b;"><strong>Weakness:</strong> ${arg.weaknesses || ''}</div>
+                            <div class="actions">
+                                <button class="btn btn-primary" onclick="draftSection('argument', ${arg.number || i+1})">
+                                    Draft Response
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+
+            } catch (error) {
+                alert('Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                loading.classList.remove('show');
+            }
+        }
+
+        // Draft section
+        async function draftSection(sectionType, argNumber = 1) {
+            const loading = document.getElementById('draftLoading');
+            const area = document.getElementById('draftArea');
+
+            loading.classList.add('show');
+            area.classList.add('empty');
+            area.textContent = 'Drafting...';
+
+            try {
+                const response = await fetch(`/project/${projectId}/draft`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        section_type: sectionType,
+                        argument_number: argNumber
+                    })
+                });
+
+                const data = await response.json();
+
+                area.classList.remove('empty');
+                area.textContent = data.content;
+
+            } catch (error) {
+                alert('Error: ' + error.message);
+                area.textContent = 'Error drafting section';
+            } finally {
+                loading.classList.remove('show');
+            }
+        }
+
+        // Draft entire brief at once
+        async function draftEntireBrief() {
+            const loading = document.getElementById('draftLoading');
+            const area = document.getElementById('draftArea');
+
+            loading.classList.add('show');
+            area.classList.add('empty');
+            area.textContent = 'Drafting entire reply brief... This may take a few minutes.';
+
+            try {
+                const response = await fetch(`/project/${projectId}/draft-all`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    area.textContent = 'Error: ' + data.error;
+                    return;
+                }
+
+                area.classList.remove('empty');
+                area.textContent = data.full_brief;
+
+            } catch (error) {
+                alert('Error: ' + error.message);
+                area.textContent = 'Error drafting brief';
+            } finally {
+                loading.classList.remove('show');
+            }
+        }
+
+        // Generate brief
+            try {
+                const response = await fetch(`/project/${projectId}/generate`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    alert('Brief generated! Click Download Brief to get the Word document.');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // Custom document upload handler
+        document.getElementById('customFileInput').addEventListener('change', async (e) => {
+            if (e.target.files.length === 0) return;
+
+            const file = e.target.files[0];
+            const docType = document.getElementById('customDocType').value;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('doc_type', docType);
+
+            const btn = e.target.parentElement;
+            btn.style.opacity = '0.5';
+            btn.textContent = 'Uploading...';
+
+            try {
+                const response = await fetch(`/project/${projectId}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    const container = document.getElementById('customDocsList');
+                    const docLabel = document.getElementById('customDocType').selectedOptions[0].text;
+                    container.innerHTML += `
+                        <div class="doc-item">
+                            <span class="name">${docLabel}: ${result.filename}</span>
+                            <span class="size">${Math.round(result.char_count/1000)}K chars</span>
+                        </div>
+                    `;
+                } else {
+                    alert('Upload failed: ' + result.error);
+                }
+            } catch (error) {
+                alert('Upload error: ' + error.message);
+            } finally {
+                btn.style.opacity = '1';
+                btn.innerHTML = 'Upload<input type="file" id="customFileInput" accept=".pdf,.docx,.txt" style="display: none;">';
+                // Re-attach event listener
+                document.getElementById('customFileInput').addEventListener('change', arguments.callee);
+            }
+
+            e.target.value = ''; // Clear input
+        });
+
+        // Load existing data on page load
+        loadDocuments();
+
+        // Load existing analysis if available
+        {% if project.analysis and project.analysis.arguments %}
+        const existingArgs = {{ project.analysis.arguments | tojson }};
+        const list = document.getElementById('argumentList');
+        existingArgs.forEach((arg, i) => {
+            list.innerHTML += `
+                <div class="argument-item">
+                    <div class="title">Point ${arg.number || i+1}: ${arg.title}</div>
+                    <div class="summary">${arg.summary}</div>
+                    <div class="actions">
+                        <button class="btn btn-primary" onclick="draftSection('argument', ${arg.number || i+1})">
+                            Draft Response
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+        {% endif %}
+    </script>
+</body>
+</html>
