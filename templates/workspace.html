@@ -71,7 +71,16 @@
             border-color: #ff6b6b;
             background: rgba(255,107,107,0.1);
         }
-        .upload-zone input { display: none; }
+        .upload-zone input[type="file"] {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .upload-zone { position: relative; }
         .upload-zone .icon { font-size: 24px; margin-bottom: 8px; }
         .upload-zone .label { font-size: 0.9em; color: #aaa; }
 
@@ -347,10 +356,8 @@
 
         // Setup upload zones
         document.querySelectorAll('.upload-zone').forEach(zone => {
-            const input = zone.querySelector('input');
+            const input = zone.querySelector('input[type="file"]');
             const docType = zone.dataset.type;
-
-            zone.addEventListener('click', () => input.click());
 
             input.addEventListener('change', async (e) => {
                 if (e.target.files.length === 0) return;
@@ -504,6 +511,7 @@
         }
 
         // Generate brief
+        async function generateBrief() {
             try {
                 const response = await fetch(`/project/${projectId}/generate`, {
                     method: 'POST'

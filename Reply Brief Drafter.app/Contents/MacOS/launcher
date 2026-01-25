@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Reply Brief Drafter Launcher
+# This app bundle launches the Reply Brief Drafter web application
+
+APP_DIR="/Users/kengorman/Library/CloudStorage/Dropbox/Reply Brief Drafter"
+PORT=5003
+
+# Navigate to the application directory
+cd "$APP_DIR"
+
+# Check if another instance is running on the port
+if lsof -i :$PORT > /dev/null 2>&1; then
+    # Server already running, just open browser
+    open "http://127.0.0.1:$PORT"
+    exit 0
+fi
+
+# Open Terminal to run the server (so user can see output and stop it)
+osascript <<EOF
+tell application "Terminal"
+    activate
+    do script "cd \"$APP_DIR\" && echo '==========================================' && echo '  REPLY BRIEF DRAFTER' && echo '==========================================' && echo '' && echo 'Starting server...' && echo '' && (sleep 2 && open 'http://127.0.0.1:$PORT') & python3 app.py"
+end tell
+EOF

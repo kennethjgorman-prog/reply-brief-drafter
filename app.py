@@ -396,9 +396,10 @@ DOCUMENTS PROVIDED:
 DRAFTING PROTOCOL - CRITICAL REQUIREMENTS:
 
 1. SOURCE-BOUND DRAFTING: Every factual assertion MUST cite to the source document.
-   - Record citation format: ([page]) - Example: "The plaintiff fell on the stairs. (125)"
-   - Appellant's Appendix format: (A. [page]) - Example: "The contract states... (A. 45)"
-   - Respondent's Appendix format: (RA. [page]) - Example: "The exhibit shows... (RA. 12)"
+   - Record/Appendix citation format: ([page]). - Period goes AFTER the closing parenthesis
+   - NO prefixes like "R." or "A." - just the page number in parentheses
+   - Example: "The plaintiff fell on the stairs" (125).
+   - Example: "The court dismissed the case" (91).
    - NO facts may be stated without a citation to Record, Appendix, or RA
    - If you cannot find support in any source document, write "[CITE NEEDED]"
 
@@ -532,9 +533,13 @@ RECORD/APPENDIX:
 
 FORMAT YOUR RESPONSE AS:
 
-PAGE (A. XX): "[exact quote or description]"
+(page number): "[exact quote or description]"
 SIGNIFICANCE: [why this matters]
 ---
+
+IMPORTANT: Use ONLY the page number in parentheses. NO "R." or "A." prefix.
+Example: (125): "The witness testified..."
+NOT: (R. 125) or (A. 125)
 
 Extract the most important moments with EXACT page numbers."""
 
@@ -582,18 +587,18 @@ RECORD/APPENDIX TO SEARCH:
 
 FORMAT - USE EXACT QUOTES WITH PAGE NUMBERS:
 
-**QUOTE (A. [page])**: "[EXACT words spoken - copy verbatim]"
+**QUOTE ([page])**: "[EXACT words spoken - copy verbatim]"
 **SPEAKER**: [Judge/Attorney name if known]
 **CONTEXT**: [Brief description of what was happening]
 **WHY IT MATTERS**: [How this quote helps or hurts the case]
 ---
 
 EXAMPLES OF WHAT TO FIND:
-- "you are accordingly relieved by this court and the case is dismissed" (A. 91)
-- "we wish not to take this case anymore" (A. 26)
-- "I told her we could only take the case if the Court was willing to stay it" (A. 77)
+- "you are accordingly relieved by this court and the case is dismissed" (91).
+- "we wish not to take this case anymore" (26).
+- "I told her we could only take the case if the Court was willing to stay it" (77).
 
-Extract EVERY significant quote. Use EXACT WORDS - do not paraphrase. Include the EXACT page number in (A. XX) format.
+Extract EVERY significant quote. Use EXACT WORDS - do not paraphrase. Include the page number in parentheses with period after: (91).
 
 This is critical - these quotes will be used verbatim in the reply brief."""
 
@@ -609,7 +614,7 @@ You have been provided with:
 
 YOUR JOB: Draft a reply brief that:
 - QUOTES cases directly (use the extracts provided)
-- QUOTES the record directly (use page cites like (A. 45))
+- QUOTES the record directly (use page cites like (45).)
 - Distinguishes respondent's cases with SPECIFIC factual/legal distinctions
 - Points to SPECIFIC record evidence respondent ignores
 
@@ -631,14 +636,18 @@ YOUR JOB: Draft a reply brief that:
 === DRAFTING REQUIREMENTS ===
 
 1. QUOTE CASES DIRECTLY:
-   - When citing a case, include the pinpoint citation: (125 AD3d at 499-500)
-   - Quote the actual holding in quotation marks
-   - Example: As this Court held in Fan v. Sabin, "further proceedings against plaintiff were stayed, by operation of CPLR 321(c), until 30 days after notice" (125 AD3d at 499-500).
+   - Use NEW YORK OFFICIAL CITATION FORMAT: 123 AD3d 456 [2d Dept 2020]
+   - Case names must use UNDERSCORES for underlining: _Case Name v. Other Party_
+   - DO NOT use **asterisks** for case names - use _underscores_ only
+   - Example: As this Court held in _Fan v Sabin_, "further proceedings" (125 AD3d at 499-500).
 
-2. QUOTE THE RECORD DIRECTLY:
-   - Use exact quotes from testimony in quotation marks
-   - Include page cite: (A. 91)
-   - Example: The court stated: "you are accordingly relieved by this court and the case is dismissed" (A. 91).
+2. RECORD CITATIONS - CRITICAL FORMAT:
+   - NEVER use "R." prefix - that is WRONG
+   - NEVER use "A." prefix - that is WRONG
+   - CORRECT format: (page number). with period AFTER parenthesis
+   - WRONG: (R. 45). WRONG: (A. 123). WRONG: (R. 529-530).
+   - CORRECT: (45). CORRECT: (123). CORRECT: (529-530).
+   - Example: The court stated: "you are accordingly relieved" (91).
 
 3. DISTINGUISH RESPONDENT'S CASES:
    - Quote what respondent claims the case holds
@@ -661,9 +670,12 @@ YOUR JOB: Draft a reply brief that:
 CRITICAL - USE THE TRANSCRIPT QUOTES:
 The KEY TRANSCRIPT QUOTES section above contains verbatim quotes from the record. USE THEM.
 - Copy quotes exactly as provided
-- Include the (A. XX) page citation
 - These quotes are your most powerful evidence - deploy them strategically
-- Example: The court stated: "you are accordingly relieved by this court and the case is dismissed" (A. 91).
+
+CRITICAL - CITATION FORMAT REMINDERS:
+- Record cites: (page). NOT (R. page). NOT (A. page). Just the number.
+- Case names: _underscored_ NOT **bolded**
+- Period goes AFTER the closing parenthesis: (91). NOT (91.)
 
 Draft an EXHAUSTIVE reply brief. Do not summarize - argue thoroughly with full citations. Every claim must be supported. Every respondent argument must be addressed and refuted."""
 
@@ -694,6 +706,10 @@ Draft an EXHAUSTIVE reply brief. Do not summarize - argue thoroughly with full c
 @app.route('/project/<project_id>/generate', methods=['POST'])
 def generate_brief(project_id):
     """Generate complete reply brief as Word document"""
+    from docx.shared import Pt
+    from docx.enum.text import WD_LINE_SPACING
+    import re
+
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
@@ -701,23 +717,55 @@ def generate_brief(project_id):
     # Create Word document
     doc = DocxDocument()
 
+    # Set default style to Courier New, 12pt, double-spaced
+    style = doc.styles['Normal']
+    style.font.name = 'Courier New'
+    style.font.size = Pt(12)
+    style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+
     # Title
     doc.add_heading(f"REPLY BRIEF FOR APPELLANT", 0)
     doc.add_paragraph(f"{project.get('case_name', '')}")
     doc.add_paragraph(f"Docket No. {project.get('docket_number', '')}")
     doc.add_paragraph("")
 
+    # Helper function to add paragraph with underlined case names
+    def add_formatted_paragraph(doc, text):
+        """Add paragraph, converting _text_ to underlined text and cleaning markdown"""
+        p = doc.add_paragraph()
+        # Remove ** bold markers (AI sometimes uses these)
+        text = re.sub(r'\*\*([^*]+)\*\*', r'_\1_', text)  # Convert **bold** to _underline_
+        text = text.replace('**', '')  # Remove any stray **
+        # Also fix any (R. X) citations to just (X)
+        text = re.sub(r'\(R\.\s*(\d+[^)]*)\)', r'(\1)', text)
+        text = re.sub(r'\(A\.\s*(\d+[^)]*)\)', r'(\1)', text)
+        # Split on underscores to find case names
+        parts = re.split(r'(_[^_]+_)', text)
+        for part in parts:
+            if part.startswith('_') and part.endswith('_') and len(part) > 2:
+                # This is a case name - underline it
+                run = p.add_run(part[1:-1])  # Remove the underscores
+                run.underline = True
+            else:
+                p.add_run(part)
+        return p
+
     # Add drafted sections
     sections = project.get('drafted_sections', {})
 
     # If full brief was drafted, use that
     if 'full_brief' in sections:
-        doc.add_paragraph(sections['full_brief'].get('content', ''))
+        content = sections['full_brief'].get('content', '')
+        for para in content.split('\n'):
+            if para.strip():
+                add_formatted_paragraph(doc, para)
     else:
         # Otherwise combine individual sections
         if 'intro' in sections:
             doc.add_heading("PRELIMINARY STATEMENT", level=1)
-            doc.add_paragraph(sections['intro'].get('content', ''))
+            for para in sections['intro'].get('content', '').split('\n'):
+                if para.strip():
+                    add_formatted_paragraph(doc, para)
 
         # Add argument sections
         arg_sections = [(k, v) for k, v in sections.items() if k.startswith('argument_')]
@@ -725,11 +773,15 @@ def generate_brief(project_id):
 
         for i, (key, section) in enumerate(arg_sections, 1):
             doc.add_heading(f"POINT {i}", level=1)
-            doc.add_paragraph(section.get('content', ''))
+            for para in section.get('content', '').split('\n'):
+                if para.strip():
+                    add_formatted_paragraph(doc, para)
 
         if 'conclusion' in sections:
             doc.add_heading("CONCLUSION", level=1)
-            doc.add_paragraph(sections['conclusion'].get('content', ''))
+            for para in sections['conclusion'].get('content', '').split('\n'):
+                if para.strip():
+                    add_formatted_paragraph(doc, para)
 
     # Signature block
     doc.add_paragraph("")
