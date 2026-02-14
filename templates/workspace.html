@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ project.case_name }} - Reply Brief Drafter</title>
+    <title>{{ project.case_name }} - {{ config.label }} - Brief Drafter</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -34,6 +34,17 @@
             text-decoration: none;
         }
         .back-link:hover { color: #fff; }
+        .badge-brief-type {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            font-weight: 500;
+            background: rgba(255,107,107,0.15);
+            color: #ff9b9b;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
 
         .grid {
             display: grid;
@@ -96,6 +107,39 @@
         }
         .doc-item .name { color: #00ff88; }
         .doc-item .size { color: #666; }
+        .doc-item .btn-summarize {
+            padding: 3px 10px;
+            font-size: 0.75em;
+            border: 1px solid rgba(100,200,255,0.4);
+            background: rgba(100,200,255,0.1);
+            color: #64c8ff;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+        .doc-item .btn-summarize:hover {
+            background: rgba(100,200,255,0.25);
+        }
+        .doc-item .btn-summarize.running {
+            opacity: 0.6;
+            cursor: wait;
+        }
+        .doc-item .badge-summarized {
+            padding: 2px 8px;
+            font-size: 0.7em;
+            background: rgba(0,255,136,0.2);
+            color: #00ff88;
+            border-radius: 4px;
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+        .summarize-progress {
+            font-size: 0.8em;
+            color: #64c8ff;
+            padding: 4px 12px;
+            margin-bottom: 4px;
+        }
 
         .btn {
             padding: 12px 20px;
@@ -159,7 +203,6 @@
             border-radius: 8px;
             padding: 20px;
             min-height: 400px;
-            white-space: pre-wrap;
             font-family: 'Georgia', serif;
             line-height: 1.8;
             font-size: 14px;
@@ -200,6 +243,185 @@
         }
         .loading.show { display: block; }
 
+        .drafting-instructions {
+            margin-bottom: 20px;
+            background: rgba(255,165,0,0.05);
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid rgba(255,165,0,0.2);
+        }
+        .drafting-instructions h4 {
+            color: #ffa500;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        .drafting-instructions p {
+            color: #888;
+            font-size: 0.82em;
+            margin-bottom: 12px;
+        }
+        .drafting-instructions-textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 12px;
+            border: 1px solid rgba(255,165,0,0.25);
+            border-radius: 8px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.9em;
+            resize: vertical;
+        }
+        .drafting-instructions-textarea:focus {
+            outline: none;
+            border-color: #ffa500;
+        }
+
+        .revise-section {
+            margin-top: 20px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.08);
+            display: none;
+        }
+        .revise-section.show { display: block; }
+        .revise-section h4 {
+            color: #ccc;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        .revise-section p {
+            color: #888;
+            font-size: 0.82em;
+            margin-bottom: 12px;
+        }
+        .revise-textarea {
+            width: 100%;
+            min-height: 80px;
+            padding: 12px;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.9em;
+            resize: vertical;
+        }
+        .revise-textarea:focus {
+            outline: none;
+            border-color: #ff6b6b;
+        }
+        .revise-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .revision-count {
+            font-size: 0.78em;
+            color: #666;
+        }
+        .revise-error {
+            display: none;
+            margin-top: 8px;
+            color: #ff6b6b;
+            font-size: 0.85em;
+        }
+        .revise-status {
+            display: none;
+            margin-top: 12px;
+            text-align: center;
+            color: #888;
+        }
+        .revise-status .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.2);
+            border-top-color: #ff6b6b;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Brief Structure Card */
+        .brief-structure textarea,
+        .brief-structure input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.85em;
+            resize: vertical;
+        }
+        .brief-structure textarea:focus,
+        .brief-structure input[type="text"]:focus {
+            outline: none;
+            border-color: #ffa500;
+        }
+        .brief-structure label {
+            display: block;
+            font-size: 0.8em;
+            color: #999;
+            margin-bottom: 4px;
+            margin-top: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .brief-structure textarea {
+            min-height: 60px;
+        }
+        .point-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,107,107,0.2);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+        .point-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .point-header span {
+            font-weight: 600;
+            color: #ff9b9b;
+            font-size: 0.85em;
+        }
+        .point-header button {
+            background: none;
+            border: 1px solid rgba(255,107,107,0.3);
+            color: #ff6b6b;
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .point-header button:hover {
+            background: rgba(255,107,107,0.15);
+        }
+        .structure-status {
+            font-size: 0.8em;
+            margin-top: 8px;
+            min-height: 1.2em;
+        }
+        .structure-status.saved { color: #00ff88; }
+        .structure-status.error { color: #ff6b6b; }
+        .structure-status.saving { color: #ffa500; }
+
         @media (max-width: 900px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -212,7 +434,7 @@
         <div class="header">
             <div>
                 <a href="/" class="back-link">&larr; All Projects</a>
-                <h1>{{ project.case_name }}</h1>
+                <h1>{{ project.case_name }} <span class="badge-brief-type">{{ config.label }}</span></h1>
             </div>
             <div style="text-align: right; color: #888; font-size: 0.9em;">
                 <div>{{ project.court }}</div>
@@ -226,40 +448,33 @@
                 <div class="card">
                     <h3>1. Upload Documents</h3>
 
-                    <div class="upload-zone" data-type="opening_brief">
+                    {% for upload in config.primary_uploads %}
+                    <div class="upload-zone" data-type="{{ upload.key }}">
                         <input type="file" accept=".pdf,.docx,.txt">
-                        <div class="icon">📄</div>
-                        <div class="label">Opening Brief (Your Brief)</div>
+                        <div class="icon">{{ upload.icon }}</div>
+                        <div class="label">{{ upload.label }}</div>
                     </div>
-                    <div id="doc-opening_brief"></div>
+                    <div id="doc-{{ upload.key }}"></div>
+                    {% endfor %}
 
-                    <div class="upload-zone" data-type="respondent_brief">
-                        <input type="file" accept=".pdf,.docx,.txt">
-                        <div class="icon">📄</div>
-                        <div class="label">Respondent's Brief</div>
-                    </div>
-                    <div id="doc-respondent_brief"></div>
+                    <!-- Dynamic upload sections -->
+                    <div id="dynamicRespondentBriefs"></div>
+                    <button class="btn btn-secondary" id="addRespondentBtn" style="margin: 8px 0; width: 100%; font-size: 0.85em;" onclick="addRespondentBriefSlot()">+ Add Respondent's Brief</button>
 
-                    <div class="upload-zone" data-type="appellant_appendix">
-                        <input type="file" accept=".pdf,.docx,.txt">
-                        <div class="icon">📑</div>
-                        <div class="label">Appellant's Appendix</div>
-                    </div>
-                    <div id="doc-appellant_appendix"></div>
+                    <div id="dynamicRecordVolumes"></div>
+                    <button class="btn btn-secondary" id="addRecordBtn" style="margin: 8px 0; width: 100%; font-size: 0.85em;" onclick="addRecordVolumeSlot()">+ Add Record Volume</button>
 
-                    <!-- Custom Documents Section -->
+                    <div id="dynamicLegalResearch"></div>
+                    <button class="btn btn-secondary" id="addResearchBtn" style="margin: 8px 0; width: 100%; font-size: 0.85em;" onclick="addLegalResearchSlot()">+ Add Legal Research</button>
+
+                    <!-- Additional Documents Section -->
                     <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1);">
-                        <h4 style="color: #888; font-size: 0.85em; margin-bottom: 10px;">ADD ADDITIONAL DOCUMENTS</h4>
+                        <h4 style="color: #888; font-size: 0.85em; margin-bottom: 10px;">ADD OTHER DOCUMENTS</h4>
                         <div style="display: flex; gap: 10px; margin-bottom: 10px;">
                             <select id="customDocType" style="flex: 1; padding: 8px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); color: #fff;">
-                                <option value="record_vol_1">Record Vol. 1</option>
-                                <option value="record_vol_2">Record Vol. 2</option>
-                                <option value="record_vol_3">Record Vol. 3</option>
-                                <option value="record_vol_4">Record Vol. 4</option>
-                                <option value="record_vol_5">Record Vol. 5</option>
-                                <option value="respondent_appendix">Respondent's Appendix</option>
-                                <option value="legal_research">Legal Research</option>
-                                <option value="other">Other Document</option>
+                                {% for upload in config.additional_uploads %}
+                                <option value="{{ upload.key }}">{{ upload.label }}</option>
+                                {% endfor %}
                             </select>
                             <label class="btn btn-secondary" style="margin: 0; padding: 8px 16px; cursor: pointer;">
                                 Upload
@@ -270,19 +485,61 @@
                     </div>
                 </div>
 
+                <!-- Brief Structure Section -->
+                <div class="card brief-structure" id="briefStructureCard">
+                    <h3>2. Brief Structure <span style="font-size:0.8em;color:#888;text-transform:none;">(attorney-directed)</span></h3>
+                    <p style="color:#888;font-size:0.8em;margin-bottom:12px;">Define the Points, facts, and cases. The AI drafts within your framework instead of figuring it out on its own.</p>
+
+                    <label>Preliminary Statement Notes</label>
+                    <textarea id="structPreliminary" placeholder="Key themes and overview of the case..."></textarea>
+
+                    <label>Procedural History</label>
+                    <textarea id="structProcedural" placeholder="Key procedural events..."></textarea>
+
+                    <label>Factual Background</label>
+                    <textarea id="structFacts" placeholder="Key facts with record cites, e.g. Defendant admitted he never checked (45)..."></textarea>
+
+                    <div id="pointsList" style="margin-top:16px;"></div>
+
+                    <button class="btn btn-secondary" style="margin-top:8px;margin-bottom:8px;" onclick="addPoint()">+ Add Point</button>
+
+                    <button class="btn btn-primary" onclick="saveStructure()">Save Structure</button>
+                    <div class="structure-status" id="structureStatus"></div>
+                </div>
+
+                <!-- NYSCEF Record Links -->
+                <div class="card" id="nyscefConfigCard">
+                    <h3>NYSCEF Record Links <span style="font-size:0.8em;color:#888;text-transform:none;">(optional)</span></h3>
+                    <p style="color:#888;font-size:0.8em;margin-bottom:12px;">
+                        Paste NYSCEF URLs for each record volume to make record citations clickable.
+                    </p>
+                    <div id="nyscefVolumeList">
+                        <p style="color:#666;font-size:0.85em;">Upload record volumes first.</p>
+                    </div>
+                    <div class="structure-status" id="nyscefStatus"></div>
+                </div>
+
+                <!-- Record Index Section -->
+                <div class="card" id="recordIndexCard">
+                    <h3>Record Index <span style="font-size:0.8em;color:#888;text-transform:none;">(recommended before drafting)</span></h3>
+                    <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Indexes the record page-by-page so the AI uses correct record page numbers when citing.</p>
+                    <button class="btn btn-primary" id="indexRecordBtn" onclick="indexRecord()">Index Record</button>
+                    <div id="indexRecordStatus" style="color:#888;font-size:0.85em;margin-top:8px;"></div>
+                </div>
+
                 <!-- Analysis Section -->
                 <div class="card">
-                    <h3>2. Analyze Arguments</h3>
+                    <h3>3. Analyze <span style="font-size:0.8em;color:#888;text-transform:none;">(optional with structure)</span></h3>
                     <button class="btn btn-primary" id="analyzeBtn" onclick="analyzeArguments()">
-                        Analyze Both Briefs
+                        {{ config.analyze_button }}
                     </button>
-                    <div class="loading" id="analyzeLoading">Analyzing arguments...</div>
+                    <div class="loading" id="analyzeLoading">{{ config.analyze_loading }}</div>
                     <div class="argument-list" id="argumentList"></div>
                 </div>
 
                 <!-- Generate Section -->
                 <div class="card">
-                    <h3>4. Generate Brief</h3>
+                    <h3>5. Generate Brief</h3>
                     <button class="btn btn-primary" onclick="generateBrief()">
                         Generate Word Document
                     </button>
@@ -294,17 +551,47 @@
 
             <div class="main">
                 <div class="card">
-                    <h3>3. Draft Brief</h3>
+                    <h3>4. Draft Brief</h3>
+                    <div class="drafting-instructions">
+                        <h4>Drafting Instructions</h4>
+                        <p>Tell the AI what to focus on: key arguments, which parts of the order to attack/defend, which cases to emphasize, tone, strategy, etc.</p>
+                        <textarea class="drafting-instructions-textarea" id="draftingInstructions" placeholder="e.g., Focus on the fact that defendant's excuse of relying on insurance is insufficient under Second Department case law. Emphasize the cases from our legal research showing that insurance delays are never a reasonable excuse. Attack Point II of the appellant's brief — their meritorious defense argument is conclusory with no factual support. Use the transcript quotes showing defendant admitted fault..."></textarea>
+                    </div>
+                    <div style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                        <label style="font-weight: bold; white-space: nowrap;">Model:</label>
+                        <select id="modelSelect" style="padding: 6px 10px; border-radius: 6px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.2); font-size: 14px;">
+                            <option value="sonnet">Sonnet (faster, cheaper)</option>
+                            <option value="opus">Opus 4.6 (best quality)</option>
+                        </select>
+                    </div>
                     <button class="btn btn-primary" onclick="draftEntireBrief()" style="margin-bottom: 15px;">
-                        Draft Entire Reply Brief
+                        {{ config.draft_button }}
                     </button>
-                    <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                    <div style="display: flex; gap: 10px; margin-bottom: 15px;">
                         <button class="btn btn-secondary" onclick="draftSection('intro')">Draft Intro Only</button>
                         <button class="btn btn-secondary" onclick="draftSection('conclusion')">Draft Conclusion Only</button>
                     </div>
-                    <div class="loading" id="draftLoading">Drafting section...</div>
+                    <div style="margin-bottom: 20px;">
+                        <textarea id="customSectionInstructions" style="width: 100%; min-height: 60px; padding: 10px; border-radius: 6px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.2); font-size: 14px; resize: vertical; box-sizing: border-box;" placeholder="Describe the section to draft, e.g., Procedural history of the motions focusing on the defective condition"></textarea>
+                        <button class="btn btn-secondary" onclick="draftCustomSection()" style="margin-top: 8px;">Draft Custom Section</button>
+                    </div>
+                    <div class="loading" id="draftLoading">{{ config.draft_loading }}</div>
                     <div class="draft-area empty" id="draftArea">
-                        Select a section to draft, or click "Draft Response" on an argument point.
+                        Upload documents, analyze, then draft your {{ config.label | lower }}.
+                    </div>
+
+                    <div class="revise-section {% if project.drafted_sections and project.drafted_sections.full_brief %}show{% endif %}" id="reviseSection">
+                        <h4>Revise Draft</h4>
+                        <p>Describe what changes you want. The existing structure and citations will be preserved unless you specifically ask to change them.</p>
+                        <textarea class="revise-textarea" id="revisionInstructions" placeholder="e.g., Strengthen the argument in Point I, Add more record citations to the Statement of the Case, Rewrite the conclusion to emphasize preservation issues..."></textarea>
+                        <div class="revise-error" id="reviseError"></div>
+                        <div class="revise-meta">
+                            <span class="revision-count" id="revisionCount"></span>
+                            <button class="btn btn-primary" style="width: auto; padding: 10px 24px; margin: 0;" id="reviseBtn" onclick="submitRevision()">Revise</button>
+                        </div>
+                        <div class="revise-status" id="reviseStatus">
+                            <span class="spinner"></span> Revising brief...
+                        </div>
                     </div>
                 </div>
             </div>
@@ -313,12 +600,174 @@
 
     <script>
         const projectId = "{{ project.id }}";
+        const briefType = "{{ project.brief_type }}";
+        let pointCounter = 0;
+
+        // === Brief Structure Functions ===
+
+        function addPoint(data) {
+            pointCounter++;
+            const num = pointCounter;
+            const container = document.getElementById('pointsList');
+            const card = document.createElement('div');
+            card.className = 'point-card';
+            card.id = `point-${num}`;
+            card.innerHTML = `
+                <div class="point-header">
+                    <span>Point ${num}</span>
+                    <button onclick="removePoint(${num})">Remove</button>
+                </div>
+                <label>Point Heading</label>
+                <input type="text" class="point-heading" placeholder="e.g., THE COURT ERRED IN GRANTING SUMMARY JUDGMENT..." value="${(data && data.heading) ? data.heading.replace(/"/g, '&quot;') : ''}">
+                <label>Argument Description</label>
+                <textarea class="point-argument" placeholder="What this point argues...">${(data && data.argument_description) || ''}</textarea>
+                <label>Key Facts (with record cites)</label>
+                <textarea class="point-facts" placeholder="e.g., Defendant admitted he never responded (45). The court noted the delay was unexplained (91)...">${(data && data.facts) || ''}</textarea>
+                <label>Key Cases (with holdings)</label>
+                <textarea class="point-cases" placeholder="e.g., Fan v Sabin, 125 AD3d 499 [2d Dept 2015] — held that mere reliance on insurance is insufficient excuse...">${(data && data.cases) || ''}</textarea>
+            `;
+            container.appendChild(card);
+        }
+
+        function removePoint(num) {
+            const card = document.getElementById(`point-${num}`);
+            if (card) card.remove();
+            // Renumber visible points
+            const cards = document.querySelectorAll('.point-card');
+            cards.forEach((c, i) => {
+                c.querySelector('.point-header span').textContent = `Point ${i + 1}`;
+            });
+        }
+
+        function collectStructure() {
+            const points = [];
+            document.querySelectorAll('.point-card').forEach(card => {
+                points.push({
+                    heading: card.querySelector('.point-heading').value.trim(),
+                    argument_description: card.querySelector('.point-argument').value.trim(),
+                    facts: card.querySelector('.point-facts').value.trim(),
+                    cases: card.querySelector('.point-cases').value.trim(),
+                });
+            });
+            return {
+                preliminary_statement: document.getElementById('structPreliminary').value.trim(),
+                procedural_history: document.getElementById('structProcedural').value.trim(),
+                factual_background: document.getElementById('structFacts').value.trim(),
+                points: points,
+            };
+        }
+
+        async function saveStructure() {
+            const statusEl = document.getElementById('structureStatus');
+            statusEl.className = 'structure-status saving';
+            statusEl.textContent = 'Saving...';
+
+            try {
+                const structure = collectStructure();
+                const resp = await fetch(`/project/${projectId}/structure`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(structure)
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    statusEl.className = 'structure-status saved';
+                    statusEl.textContent = `Saved (${data.point_count} point${data.point_count !== 1 ? 's' : ''})`;
+                } else {
+                    statusEl.className = 'structure-status error';
+                    statusEl.textContent = 'Error: ' + (data.error || 'Unknown');
+                }
+            } catch(e) {
+                statusEl.className = 'structure-status error';
+                statusEl.textContent = 'Save failed: ' + e.message;
+            }
+        }
+
+        async function loadStructure() {
+            try {
+                const resp = await fetch(`/project/${projectId}/structure`);
+                const data = await resp.json();
+                if (data.structure) {
+                    const s = data.structure;
+                    document.getElementById('structPreliminary').value = s.preliminary_statement || '';
+                    document.getElementById('structProcedural').value = s.procedural_history || '';
+                    document.getElementById('structFacts').value = s.factual_background || '';
+                    if (s.points && s.points.length > 0) {
+                        s.points.forEach(pt => addPoint(pt));
+                        document.getElementById('structureStatus').className = 'structure-status saved';
+                        document.getElementById('structureStatus').textContent = `Loaded (${s.points.length} point${s.points.length !== 1 ? 's' : ''})`;
+                    }
+                }
+            } catch(e) {
+                console.error('Error loading structure:', e);
+            }
+        }
+
+        // Convert _Case Name_ to underlined text for display
+        function formatBriefText(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            let escaped = div.innerHTML;
+            escaped = escaped.replace(/_((?:(?!_).)+)_/g, '<u>$1</u>');
+
+            // NYSCEF hyperlink injection
+            if (window.nyscefConfig && window.nyscefConfig.volumes && window.nyscefConfig.volumes.length > 0) {
+                escaped = escaped.replace(/\((\d+(?:\s*-\s*\d+)?)\)/g, function(match, inner) {
+                    const page = parseInt(inner);
+                    const url = resolveNyscefUrl(page, window.nyscefConfig);
+                    if (url) {
+                        return '(<a href="' + url + '" target="_blank" style="color:#4fc3f7;text-decoration:underline;">' + inner + '</a>)';
+                    }
+                    return match;
+                });
+            }
+
+            escaped = escaped.split('\n').map(line =>
+                line.trim() ? '<p style="margin:0 0 0.5em 0;">' + line + '</p>' : '<br>'
+            ).join('');
+            return escaped;
+        }
 
         // Load existing documents
+        // Track which docs have summaries
+        let docSummaries = {};
+
+        async function loadSummaries() {
+            // Check for existing summaries for known doc types
+            const docTypes = ['trial_transcript', 'appellant_appendix', 'record',
+                              'record_vol_1', 'record_vol_2', 'record_vol_3', 'record_vol_4', 'record_vol_5'];
+            for (const dt of docTypes) {
+                try {
+                    const resp = await fetch(`/project/${projectId}/summary/${dt}`);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        if (data.narrative) docSummaries[dt] = data;
+                    }
+                } catch(e) {}
+            }
+        }
+
+        function summarizeBtn(docType) {
+            if (docSummaries[docType]) {
+                return `<span class="badge-summarized">${docSummaries[docType].word_count}w</span>`;
+            }
+            // Only show summarize button for transcript/record/appendix types
+            const summarizable = ['trial_transcript', 'appellant_appendix', 'record',
+                                  'record_vol_1', 'record_vol_2', 'record_vol_3', 'record_vol_4', 'record_vol_5'];
+            if (summarizable.includes(docType)) {
+                return `<button class="btn-summarize" onclick="summarizeDoc('${docType}')">Summarize</button>`;
+            }
+            return '';
+        }
+
         async function loadDocuments() {
+            await loadSummaries();
             try {
                 const response = await fetch(`/project/${projectId}/documents`);
                 const data = await response.json();
+
+                // Create dynamic slots for any existing docs that need them
+                restoreDynamicSlots(data.documents);
 
                 const customDocs = [];
                 data.documents.forEach(doc => {
@@ -328,15 +777,14 @@
                             <div class="doc-item">
                                 <span class="name">${doc.filename}</span>
                                 <span class="size">${Math.round(doc.char_count/1000)}K chars</span>
+                                ${summarizeBtn(doc.type)}
                             </div>
                         `;
                     } else {
-                        // Custom document - add to list
                         customDocs.push(doc);
                     }
                 });
 
-                // Show custom documents
                 if (customDocs.length > 0) {
                     const customList = document.getElementById('customDocsList');
                     customDocs.forEach(doc => {
@@ -345,12 +793,191 @@
                             <div class="doc-item">
                                 <span class="name">${label}: ${doc.filename}</span>
                                 <span class="size">${Math.round(doc.char_count/1000)}K chars</span>
+                                ${summarizeBtn(doc.type)}
                             </div>
                         `;
                     });
                 }
+
+                // Render NYSCEF config inputs for record volumes
+                renderNyscefInputs(data.documents);
+                loadNyscefConfig();
             } catch (e) {
                 console.error('Error loading documents:', e);
+            }
+        }
+
+        // === NYSCEF Record Links ===
+        window.nyscefConfig = null;
+        window.currentBriefText = null;
+
+        function renderNyscefInputs(docs) {
+            const container = document.getElementById('nyscefVolumeList');
+            const recordDocs = docs.filter(d => d.type.startsWith('record_vol_') || d.type === 'record');
+            if (recordDocs.length === 0) {
+                container.innerHTML = '<p style="color:#666;font-size:0.85em;">Upload record volumes first.</p>';
+                return;
+            }
+            container.innerHTML = recordDocs.map(doc => {
+                const label = doc.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                return `
+                <div style="margin-bottom:12px;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;" data-nyscef-key="${doc.type}">
+                    <div style="color:#ff9b9b;font-size:0.85em;font-weight:600;margin-bottom:6px;">${label}: ${doc.filename}</div>
+                    <input type="text" class="nyscef-url" placeholder="NYSCEF URL or doc index"
+                           style="width:100%;padding:6px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;margin-bottom:4px;box-sizing:border-box;font-size:13px;">
+                    <div style="display:flex;gap:8px;">
+                        <div style="flex:1;">
+                            <label style="font-size:0.75em;color:#888;">First record page</label>
+                            <input type="number" class="nyscef-first-page" value="1" min="1"
+                                   style="width:100%;padding:4px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;box-sizing:border-box;">
+                        </div>
+                        <div style="flex:1;">
+                            <label style="font-size:0.75em;color:#888;">PDF page offset</label>
+                            <input type="number" class="nyscef-offset" value="0" min="0"
+                                   style="width:100%;padding:4px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;box-sizing:border-box;">
+                        </div>
+                    </div>
+                </div>`;
+            }).join('') + '<button class="btn btn-secondary" style="margin-top:8px;" onclick="saveNyscefConfig()">Save NYSCEF Config</button>';
+        }
+
+        async function saveNyscefConfig() {
+            const statusEl = document.getElementById('nyscefStatus');
+            statusEl.className = 'structure-status saving';
+            statusEl.textContent = 'Saving...';
+            const volumes = [];
+            document.querySelectorAll('[data-nyscef-key]').forEach(el => {
+                const url = el.querySelector('.nyscef-url').value.trim();
+                if (url) {
+                    volumes.push({
+                        doc_key: el.dataset.nyscefKey,
+                        doc_index: url,
+                        first_page: parseInt(el.querySelector('.nyscef-first-page').value) || 1,
+                        page_offset: parseInt(el.querySelector('.nyscef-offset').value) || 0,
+                    });
+                }
+            });
+            try {
+                const resp = await fetch(`/project/${projectId}/nyscef-config`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({volumes})
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    statusEl.className = 'structure-status saved';
+                    statusEl.textContent = `Saved (${data.volume_count} volume${data.volume_count !== 1 ? 's' : ''})`;
+                    window.nyscefConfig = {volumes};
+                    rerenderBriefWithLinks();
+                }
+            } catch(e) {
+                statusEl.className = 'structure-status error';
+                statusEl.textContent = 'Save failed: ' + e.message;
+            }
+        }
+
+        async function loadNyscefConfig() {
+            try {
+                const resp = await fetch(`/project/${projectId}/nyscef-config`);
+                const data = await resp.json();
+                if (data.nyscef_config && data.nyscef_config.volumes && data.nyscef_config.volumes.length > 0) {
+                    window.nyscefConfig = data.nyscef_config;
+                    data.nyscef_config.volumes.forEach(vol => {
+                        const el = document.querySelector(`[data-nyscef-key="${vol.doc_key}"]`);
+                        if (el) {
+                            el.querySelector('.nyscef-url').value = vol.doc_index;
+                            el.querySelector('.nyscef-first-page').value = vol.first_page;
+                            el.querySelector('.nyscef-offset').value = vol.page_offset;
+                        }
+                    });
+                    const statusEl = document.getElementById('nyscefStatus');
+                    statusEl.className = 'structure-status saved';
+                    statusEl.textContent = `Loaded (${data.nyscef_config.volumes.length} volume${data.nyscef_config.volumes.length !== 1 ? 's' : ''})`;
+                }
+            } catch(e) {
+                console.error('Error loading NYSCEF config:', e);
+            }
+        }
+
+        function resolveNyscefUrl(page, config) {
+            if (!config || !config.volumes || config.volumes.length === 0) return null;
+            const sorted = [...config.volumes].sort((a, b) => (b.first_page || 0) - (a.first_page || 0));
+            for (const vol of sorted) {
+                if (!vol.doc_index) continue;
+                const firstPage = vol.first_page || 1;
+                if (page >= firstPage) {
+                    const pdfPage = (page - firstPage) + 1 + (vol.page_offset || 0);
+                    return 'https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex=' + encodeURIComponent(vol.doc_index) + '#page=' + pdfPage;
+                }
+            }
+            return null;
+        }
+
+        function rerenderBriefWithLinks() {
+            if (window.currentBriefText) {
+                const area = document.getElementById('draftArea');
+                area.innerHTML = formatBriefText(window.currentBriefText);
+            }
+        }
+
+        async function summarizeDoc(docType) {
+            const btn = event.target;
+            btn.textContent = 'Starting...';
+            btn.classList.add('running');
+            btn.disabled = true;
+
+            try {
+                const resp = await fetch(`/project/${projectId}/summarize/${docType}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({model: 'sonnet'})
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    btn.textContent = 'Summarize';
+                    btn.classList.remove('running');
+                    btn.disabled = false;
+                    return;
+                }
+
+                // Poll for progress
+                const jobId = data.job_id;
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const statusResp = await fetch(`/project/${projectId}/summarize-status/${jobId}`);
+                        const status = await statusResp.json();
+
+                        if (status.stage === 'extraction') {
+                            btn.textContent = `Extracting ${status.current}/${status.total}...`;
+                        } else if (status.stage === 'drafting') {
+                            btn.textContent = 'Drafting...';
+                        }
+
+                        if (status.status === 'complete') {
+                            clearInterval(pollInterval);
+                            docSummaries[docType] = status.result;
+                            // Replace button with badge
+                            btn.outerHTML = `<span class="badge-summarized">${status.result.word_count}w</span>`;
+                        } else if (status.status === 'error') {
+                            clearInterval(pollInterval);
+                            alert('Summarization error: ' + status.error);
+                            btn.textContent = 'Summarize';
+                            btn.classList.remove('running');
+                            btn.disabled = false;
+                        }
+                    } catch(e) {
+                        clearInterval(pollInterval);
+                        btn.textContent = 'Summarize';
+                        btn.classList.remove('running');
+                        btn.disabled = false;
+                    }
+                }, 2000);
+            } catch(e) {
+                alert('Failed to start summarization');
+                btn.textContent = 'Summarize';
+                btn.classList.remove('running');
+                btn.disabled = false;
             }
         }
 
@@ -384,8 +1011,17 @@
                             <div class="doc-item">
                                 <span class="name">${result.filename}</span>
                                 <span class="size">${Math.round(result.char_count/1000)}K chars</span>
+                                ${summarizeBtn(docType)}
                             </div>
                         `;
+
+                        // If existing draft uploaded, show it in draft area and enable revisions
+                        if (docType === 'existing_draft' && result.text) {
+                            const draftArea = document.getElementById('draftArea');
+                            draftArea.classList.remove('empty');
+                            draftArea.textContent = result.text;
+                            showReviseSection();
+                        }
                     } else {
                         alert('Upload failed: ' + result.error);
                     }
@@ -398,6 +1034,175 @@
             });
         });
 
+        // === Dynamic upload slot counters ===
+        let nextRespondentNum = 2;  // respondent_brief is primary, extras start at 2
+        let nextRecordNum = 3;      // vol 1 & 2 are primary, extras start at 3
+        let nextResearchNum = 2;    // legal_research is primary, extras start at 2
+
+        function createDynamicUploadZone(docType, label, containerSelector) {
+            const container = document.querySelector(containerSelector);
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = `
+                <div class="upload-zone" data-type="${docType}" style="margin-top: 8px;">
+                    <input type="file" accept=".pdf,.docx,.txt">
+                    <div class="icon">📁</div>
+                    <div class="label">${label}</div>
+                </div>
+                <div id="doc-${docType}"></div>
+            `;
+            container.appendChild(wrapper);
+
+            // Wire up the upload handler
+            const zone = wrapper.querySelector('.upload-zone');
+            const input = zone.querySelector('input[type="file"]');
+            input.addEventListener('change', async (e) => {
+                if (e.target.files.length === 0) return;
+                const file = e.target.files[0];
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('doc_type', docType);
+                zone.style.opacity = '0.5';
+                zone.querySelector('.label').textContent = 'Uploading...';
+                try {
+                    const response = await fetch(`/project/${projectId}/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        document.getElementById(`doc-${docType}`).innerHTML = `
+                            <div class="doc-item">
+                                <span class="name">${result.filename}</span>
+                                <span class="size">${Math.round(result.char_count/1000)}K chars</span>
+                                ${summarizeBtn(docType)}
+                            </div>
+                        `;
+                    } else {
+                        alert('Upload failed: ' + result.error);
+                    }
+                } catch (error) {
+                    alert('Upload error: ' + error.message);
+                } finally {
+                    zone.style.opacity = '1';
+                    zone.querySelector('.label').textContent = label;
+                }
+            });
+        }
+
+        function addRespondentBriefSlot() {
+            createDynamicUploadZone(
+                `respondent_brief_${nextRespondentNum}`,
+                `Respondent's Brief #${nextRespondentNum}`,
+                '#dynamicRespondentBriefs'
+            );
+            nextRespondentNum++;
+        }
+
+        function addRecordVolumeSlot() {
+            createDynamicUploadZone(
+                `record_vol_${nextRecordNum}`,
+                `Record on Appeal Vol. ${nextRecordNum}`,
+                '#dynamicRecordVolumes'
+            );
+            nextRecordNum++;
+        }
+
+        function addLegalResearchSlot() {
+            createDynamicUploadZone(
+                `legal_research_${nextResearchNum}`,
+                `Legal Research ${nextResearchNum}`,
+                '#dynamicLegalResearch'
+            );
+            nextResearchNum++;
+        }
+
+        // On page load, create slots for any existing dynamic docs
+        function restoreDynamicSlots(documents) {
+            const docs = documents || [];
+            docs.forEach(doc => {
+                const t = doc.type;
+                // Respondent briefs beyond #1
+                const rbMatch = t.match(/^respondent_brief_(\d+)$/);
+                if (rbMatch) {
+                    const num = parseInt(rbMatch[1]);
+                    createDynamicUploadZone(t, `Respondent's Brief #${num}`, '#dynamicRespondentBriefs');
+                    if (num >= nextRespondentNum) nextRespondentNum = num + 1;
+                }
+                // Record volumes beyond #2
+                const rvMatch = t.match(/^record_vol_(\d+)$/);
+                if (rvMatch) {
+                    const num = parseInt(rvMatch[1]);
+                    if (num >= 3) {
+                        createDynamicUploadZone(t, `Record on Appeal Vol. ${num}`, '#dynamicRecordVolumes');
+                    }
+                    if (num >= nextRecordNum) nextRecordNum = num + 1;
+                }
+                // Legal research beyond #1
+                const lrMatch = t.match(/^legal_research_(\d+)$/);
+                if (lrMatch) {
+                    const num = parseInt(lrMatch[1]);
+                    createDynamicUploadZone(t, `Legal Research ${num}`, '#dynamicLegalResearch');
+                    if (num >= nextResearchNum) nextResearchNum = num + 1;
+                }
+            });
+        }
+
+        // Index Record
+        async function indexRecord() {
+            const btn = document.getElementById('indexRecordBtn');
+            const status = document.getElementById('indexRecordStatus');
+            btn.disabled = true;
+            btn.textContent = 'Indexing...';
+            status.textContent = 'Starting record index...';
+
+            try {
+                const resp = await fetch(`/project/${projectId}/index-record`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({})
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    status.textContent = 'Error: ' + data.error;
+                    btn.disabled = false;
+                    btn.textContent = 'Index Record';
+                    return;
+                }
+                const jobId = data.job_id;
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const statusResp = await fetch(`/project/${projectId}/index-record-status/${jobId}`);
+                        const job = await statusResp.json();
+                        status.textContent = job.message || 'Processing...';
+                        if (job.stage === 'extraction') {
+                            btn.textContent = `Indexing ${job.current}/${job.total}...`;
+                        }
+                        if (job.status === 'complete') {
+                            clearInterval(pollInterval);
+                            status.textContent = `Done: ${job.result.fact_count} facts indexed`;
+                            status.style.color = '#00ff88';
+                            btn.textContent = 'Re-Index Record';
+                            btn.disabled = false;
+                        } else if (job.status === 'error') {
+                            clearInterval(pollInterval);
+                            status.textContent = 'Error: ' + job.error;
+                            btn.textContent = 'Index Record';
+                            btn.disabled = false;
+                        }
+                    } catch(e) {
+                        clearInterval(pollInterval);
+                        status.textContent = 'Poll error';
+                        btn.textContent = 'Index Record';
+                        btn.disabled = false;
+                    }
+                }, 3000);
+            } catch(e) {
+                status.textContent = 'Error: ' + e.message;
+                btn.disabled = false;
+                btn.textContent = 'Index Record';
+            }
+        }
+
         // Analyze arguments
         async function analyzeArguments() {
             const btn = document.getElementById('analyzeBtn');
@@ -408,8 +1213,11 @@
             loading.classList.add('show');
 
             try {
+                const selectedModel = document.getElementById('modelSelect').value;
                 const response = await fetch(`/project/${projectId}/analyze`, {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: selectedModel })
                 });
 
                 const data = await response.json();
@@ -420,13 +1228,22 @@
                 }
 
                 list.innerHTML = '';
-                (data.arguments || []).forEach((arg, i) => {
+                const args = data.arguments || data.errors || data.weaknesses || [];
+                args.forEach((arg, i) => {
+                    const title = arg.title || arg.issue || '';
+                    const detail1Label = briefType === 'appellant' ? 'Error' : (briefType === 'respondent' ? "Appellant argues" : 'You argued');
+                    const detail1 = arg.error_description || arg.appellant_argument || arg.summary || '';
+                    const detail2Label = briefType === 'appellant' ? 'Strategy' : (briefType === 'respondent' ? 'Weakness' : 'They counter');
+                    const detail2 = arg.reply_strategy || arg.weakness || arg.respondent_counter || '';
+                    const weaknessLabel = briefType === 'appellant' ? 'Standard of Review' : 'Weakness';
+                    const weakness = arg.standard_of_review || arg.weaknesses || '';
+
                     list.innerHTML += `
                         <div class="argument-item">
-                            <div class="title">Point ${arg.number || i+1}: ${arg.title}</div>
-                            <div class="summary" style="margin-bottom: 5px;"><strong>You argued:</strong> ${arg.appellant_argument || arg.summary || ''}</div>
-                            <div class="summary"><strong>They counter:</strong> ${arg.respondent_counter || ''}</div>
-                            <div class="summary" style="color: #ff6b6b;"><strong>Weakness:</strong> ${arg.weaknesses || ''}</div>
+                            <div class="title">Point ${arg.number || i+1}: ${title}</div>
+                            <div class="summary" style="margin-bottom: 5px;"><strong>${detail1Label}:</strong> ${detail1}</div>
+                            <div class="summary"><strong>${detail2Label}:</strong> ${detail2}</div>
+                            ${weakness ? `<div class="summary" style="color: #ff6b6b;"><strong>${weaknessLabel}:</strong> ${weakness}</div>` : ''}
                             <div class="actions">
                                 <button class="btn btn-primary" onclick="draftSection('argument', ${arg.number || i+1})">
                                     Draft Response
@@ -445,7 +1262,7 @@
         }
 
         // Draft section
-        async function draftSection(sectionType, argNumber = 1) {
+        async function draftSection(sectionType, argNumber = 1, customInstructions = '') {
             const loading = document.getElementById('draftLoading');
             const area = document.getElementById('draftArea');
 
@@ -454,19 +1271,25 @@
             area.textContent = 'Drafting...';
 
             try {
+                const body = {
+                    section_type: sectionType,
+                    argument_number: argNumber,
+                    model: document.getElementById('modelSelect').value
+                };
+                if (sectionType === 'custom') {
+                    body.custom_instructions = customInstructions;
+                }
                 const response = await fetch(`/project/${projectId}/draft`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        section_type: sectionType,
-                        argument_number: argNumber
-                    })
+                    body: JSON.stringify(body)
                 });
 
                 const data = await response.json();
 
                 area.classList.remove('empty');
-                area.textContent = data.content;
+                window.currentBriefText = data.content;
+                area.innerHTML = formatBriefText(data.content);
 
             } catch (error) {
                 alert('Error: ' + error.message);
@@ -476,19 +1299,49 @@
             }
         }
 
-        // Draft entire brief at once
+        function draftCustomSection() {
+            const instructions = document.getElementById('customSectionInstructions').value.trim();
+            if (!instructions) {
+                alert('Please describe the section you want to draft.');
+                return;
+            }
+            draftSection('custom', 1, instructions);
+        }
+
+        // Draft entire brief
         async function draftEntireBrief() {
             const loading = document.getElementById('draftLoading');
             const area = document.getElementById('draftArea');
+            const instructions = document.getElementById('draftingInstructions').value.trim();
+
+            // Auto-save structure before drafting if Points exist
+            const structure = collectStructure();
+            if (structure.points.length > 0) {
+                try {
+                    await fetch(`/project/${projectId}/structure`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(structure)
+                    });
+                    const statusEl = document.getElementById('structureStatus');
+                    statusEl.className = 'structure-status saved';
+                    statusEl.textContent = `Auto-saved (${structure.points.length} point${structure.points.length !== 1 ? 's' : ''})`;
+                } catch(e) {
+                    console.warn('Auto-save structure failed:', e);
+                }
+            }
 
             loading.classList.add('show');
             area.classList.add('empty');
-            area.textContent = 'Drafting entire reply brief... This may take a few minutes.';
+            area.textContent = structure.points.length > 0
+                ? 'Drafting brief from your structure... This may take a few minutes.'
+                : 'Drafting brief... This may take a few minutes.';
 
             try {
                 const response = await fetch(`/project/${projectId}/draft-all`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ drafting_instructions: instructions, model: document.getElementById('modelSelect').value })
                 });
 
                 const data = await response.json();
@@ -500,13 +1353,77 @@
                 }
 
                 area.classList.remove('empty');
-                area.textContent = data.full_brief;
+                window.currentBriefText = data.full_brief;
+                area.innerHTML = formatBriefText(data.full_brief);
+                showReviseSection();
 
             } catch (error) {
                 alert('Error: ' + error.message);
                 area.textContent = 'Error drafting brief';
             } finally {
                 loading.classList.remove('show');
+            }
+        }
+
+        // Show/hide revise section
+        function showReviseSection(revisionCount) {
+            document.getElementById('reviseSection').classList.add('show');
+            if (revisionCount > 0) {
+                document.getElementById('revisionCount').textContent = `Revision ${revisionCount}`;
+            }
+        }
+
+        // Submit revision
+        async function submitRevision() {
+            const instructions = document.getElementById('revisionInstructions').value.trim();
+            const errorEl = document.getElementById('reviseError');
+            const statusEl = document.getElementById('reviseStatus');
+            const btnEl = document.getElementById('reviseBtn');
+            const textareaEl = document.getElementById('revisionInstructions');
+            const area = document.getElementById('draftArea');
+
+            errorEl.style.display = 'none';
+
+            if (!instructions) {
+                errorEl.textContent = 'Please enter revision instructions.';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            btnEl.disabled = true;
+            btnEl.style.opacity = '0.5';
+            statusEl.style.display = 'block';
+            textareaEl.disabled = true;
+
+            try {
+                const response = await fetch(`/project/${projectId}/revise`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ revision_instructions: instructions, model: document.getElementById('modelSelect').value })
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    errorEl.textContent = data.error;
+                    errorEl.style.display = 'block';
+                    return;
+                }
+
+                area.classList.remove('empty');
+                window.currentBriefText = data.revised_brief;
+                area.innerHTML = formatBriefText(data.revised_brief);
+                textareaEl.value = '';
+                document.getElementById('revisionCount').textContent = `Revision ${data.revision_count}`;
+
+            } catch (error) {
+                errorEl.textContent = 'Revision failed: ' + error.message;
+                errorEl.style.display = 'block';
+            } finally {
+                btnEl.disabled = false;
+                btnEl.style.opacity = '1';
+                statusEl.style.display = 'none';
+                textareaEl.disabled = false;
             }
         }
 
@@ -568,25 +1485,29 @@
             } finally {
                 btn.style.opacity = '1';
                 btn.innerHTML = 'Upload<input type="file" id="customFileInput" accept=".pdf,.docx,.txt" style="display: none;">';
-                // Re-attach event listener
                 document.getElementById('customFileInput').addEventListener('change', arguments.callee);
             }
 
-            e.target.value = ''; // Clear input
+            e.target.value = '';
         });
 
         // Load existing data on page load
         loadDocuments();
+        loadStructure();
 
         // Load existing analysis if available
-        {% if project.analysis and project.analysis.arguments %}
-        const existingArgs = {{ project.analysis.arguments | tojson }};
+        {% if project.analysis %}
+        {% set args_data = project.analysis.arguments or project.analysis.errors or project.analysis.weaknesses or [] %}
+        {% if args_data %}
+        const existingArgs = {{ args_data | tojson }};
         const list = document.getElementById('argumentList');
         existingArgs.forEach((arg, i) => {
+            const title = arg.title || arg.issue || '';
+            const summary = arg.summary || arg.error_description || arg.appellant_argument || '';
             list.innerHTML += `
                 <div class="argument-item">
-                    <div class="title">Point ${arg.number || i+1}: ${arg.title}</div>
-                    <div class="summary">${arg.summary}</div>
+                    <div class="title">Point ${arg.number || i+1}: ${title}</div>
+                    <div class="summary">${summary}</div>
                     <div class="actions">
                         <button class="btn btn-primary" onclick="draftSection('argument', ${arg.number || i+1})">
                             Draft Response
@@ -595,6 +1516,24 @@
                 </div>
             `;
         });
+        {% endif %}
+        {% endif %}
+
+        // Load saved drafting instructions if they exist
+        {% if project.drafting_instructions %}
+        document.getElementById('draftingInstructions').value = {{ project.drafting_instructions | tojson }};
+        {% endif %}
+
+        // Show revise section and draft content if a full brief exists
+        {% if project.drafted_sections and project.drafted_sections.full_brief %}
+        (function() {
+            const area = document.getElementById('draftArea');
+            const content = {{ project.drafted_sections.full_brief.content | tojson }};
+            area.classList.remove('empty');
+            window.currentBriefText = content;
+            area.innerHTML = formatBriefText(content);
+            showReviseSection({{ project.revision_count | default(0) }});
+        })();
         {% endif %}
     </script>
 </body>
