@@ -1996,11 +1996,10 @@ def _preprocess_opening_brief(opening_text):
 
     if absent_topics:
         constraints.append(
-            'SCOPE EXCLUSIONS (MANDATORY): The following topics are NOT addressed in the '
-            'opening brief and MUST NOT appear in the reply brief:\n  - '
+            'SCOPE NOTE: The following topics are NOT raised in the opening brief:\n  - '
             + '\n  - '.join(absent_topics)
-            + '\nIf any of these appear in the respondent\'s brief, IGNORE them — they are '
-            'outside the scope of this appeal.'
+            + '\nDo NOT create standalone Points for these topics. However, if respondents '
+            'raise these as defenses, you MUST address and rebut them within the relevant Point.'
         )
 
     # --- 4. CASE LAW FROM OPENING BRIEF ---
@@ -3235,11 +3234,10 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
    - Explain specifically why the case doesn't apply here
    - Point to ACTUAL record evidence (verify against the record, not the opposing brief)
 
-4. STRUCTURE — MUST MATCH THE OPENING BRIEF:
+4. STRUCTURE:
    - PRELIMINARY STATEMENT
-   - Use EXACTLY the same number of Points as the opening brief (see OPENING BRIEF CONSTRAINTS above)
-   - Use the SAME Point headings as the opening brief
-   - Do NOT add extra Points, split Points, or reorganize the structure
+   - POINT I, II, III, etc. (one for EACH major argument - be thorough)
+   - You MUST address EVERY argument defendants raise, even if it falls outside the opening brief's Points
    - CONCLUSION
 
 5. LENGTH AND DEPTH — MINIMUM 4,000 WORDS:
