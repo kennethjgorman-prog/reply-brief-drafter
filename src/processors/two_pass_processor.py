@@ -13,6 +13,7 @@ Citation format is controlled by citation_config, hardcoded per app type.
 import json
 import os
 import re
+import time
 from typing import List, Dict, Optional, Callable
 from anthropic import Anthropic
 
@@ -89,6 +90,7 @@ class TwoPassProcessor:
         }
         self.model = self.models.get(model, self.models['sonnet'])
 
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -126,7 +128,8 @@ class TwoPassProcessor:
             )
 
         # --- Chunk ---
-        chunks = self._make_chunks(pages, chunk_size)
+        effective_chunk_size = chunk_size
+        chunks = self._make_chunks(pages, effective_chunk_size)
         total_chunks = len(chunks)
 
         if progress_callback:
@@ -217,7 +220,6 @@ TRANSCRIPT CHUNK (Pages {chunk['range']}):
             system=self.EXTRACTION_SYSTEM,
             messages=[{"role": "user", "content": user_prompt}],
         )
-
         result_text = response.content[0].text.strip()
 
         # Strip markdown fences if present

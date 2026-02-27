@@ -51,8 +51,8 @@
             grid-template-columns: 350px 1fr;
             gap: 30px;
         }
-        .sidebar { }
-        .main { }
+        .sidebar { overflow: hidden; min-width: 0; }
+        .main { min-width: 0; }
 
         .card {
             background: rgba(255,255,255,0.05);
@@ -91,9 +91,9 @@
             opacity: 0;
             cursor: pointer;
         }
-        .upload-zone { position: relative; }
+        .upload-zone { position: relative; overflow: hidden; }
         .upload-zone .icon { font-size: 24px; margin-bottom: 8px; }
-        .upload-zone .label { font-size: 0.9em; color: #aaa; }
+        .upload-zone .label { font-size: 0.9em; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         .doc-item {
             display: flex;
@@ -104,9 +104,22 @@
             border-radius: 6px;
             margin-bottom: 8px;
             font-size: 0.9em;
+            overflow: hidden;
         }
-        .doc-item .name { color: #00ff88; }
-        .doc-item .size { color: #666; }
+        .doc-item .name {
+            color: #00ff88;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+            flex: 1;
+        }
+        .doc-item .size {
+            color: #666;
+            white-space: nowrap;
+            flex-shrink: 0;
+            margin-left: 8px;
+        }
         .doc-item .btn-summarize {
             padding: 3px 10px;
             font-size: 0.75em;
@@ -454,12 +467,15 @@
                         <div class="icon">{{ upload.icon }}</div>
                         <div class="label">{{ upload.label }}</div>
                     </div>
+                    {% if upload.key == 'legal_research' %}
+                    <input type="text" class="issue-name-input" data-for="{{ upload.key }}" placeholder="Issue name (e.g., Negligence, Damages)" style="width: 100%; padding: 6px 10px; margin: 4px 0 8px 0; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #ccc; font-size: 0.85em;">
+                    {% endif %}
                     <div id="doc-{{ upload.key }}"></div>
                     {% endfor %}
 
                     <!-- Dynamic upload sections -->
                     <div id="dynamicRespondentBriefs"></div>
-                    <button class="btn btn-secondary" id="addRespondentBtn" style="margin: 8px 0; width: 100%; font-size: 0.85em;" onclick="addRespondentBriefSlot()">+ Add Respondent's Brief</button>
+                    <button class="btn btn-secondary" id="addRespondentBtn" style="margin: 8px 0; width: 100%; font-size: 0.85em;" onclick="addRespondentBriefSlot()">+ Add Co-Respondent's Brief</button>
 
                     <div id="dynamicRecordVolumes"></div>
                     <button class="btn btn-secondary" id="addRecordBtn" style="margin: 8px 0; width: 100%; font-size: 0.85em;" onclick="addRecordVolumeSlot()">+ Add Record Volume</button>
@@ -511,7 +527,7 @@
                 <div class="card" id="nyscefConfigCard">
                     <h3>NYSCEF Record Links <span style="font-size:0.8em;color:#888;text-transform:none;">(optional)</span></h3>
                     <p style="color:#888;font-size:0.8em;margin-bottom:12px;">
-                        Paste NYSCEF URLs for each record volume to make record citations clickable.
+                        Paste NYSCEF document URLs to make record citations clickable in the brief and Word download.
                     </p>
                     <div id="nyscefVolumeList">
                         <p style="color:#666;font-size:0.85em;">Upload record volumes first.</p>
@@ -525,6 +541,16 @@
                     <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Indexes the record page-by-page so the AI uses correct record page numbers when citing.</p>
                     <button class="btn btn-primary" id="indexRecordBtn" onclick="indexRecord()">Index Record</button>
                     <div id="indexRecordStatus" style="color:#888;font-size:0.85em;margin-top:8px;"></div>
+                </div>
+
+                <!-- Witness Map Section -->
+                <div class="card" id="witnessMapCard">
+                    <h3>Witness Map <span style="font-size:0.8em;color:#888;text-transform:none;">(auto-detected from transcripts)</span></h3>
+                    <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Prevents misattribution by tracking which party called each witness. Edit party/role if auto-detection is wrong.</p>
+                    <button class="btn btn-secondary" onclick="extractWitnesses()" id="extractWitnessBtn" style="margin-bottom:10px;">Extract Witnesses from Uploads</button>
+                    <div id="witnessMapList" style="margin-top:8px;"></div>
+                    <button class="btn btn-primary" onclick="saveWitnessMap()" id="saveWitnessBtn" style="display:none;margin-top:8px;">Save Witness Map</button>
+                    <div id="witnessMapStatus" style="color:#888;font-size:0.85em;margin-top:8px;"></div>
                 </div>
 
                 <!-- Analysis Section -->
@@ -710,15 +736,20 @@
             let escaped = div.innerHTML;
             escaped = escaped.replace(/_((?:(?!_).)+)_/g, '<u>$1</u>');
 
-            // NYSCEF hyperlink injection
+            // NYSCEF hyperlink injection — matches record citations including comma-separated refs
+            // e.g. (624), (547-548), (547-548, 556), (730-731, 734)
             if (window.nyscefConfig && window.nyscefConfig.volumes && window.nyscefConfig.volumes.length > 0) {
-                escaped = escaped.replace(/\((\d+(?:\s*-\s*\d+)?)\)/g, function(match, inner) {
-                    const page = parseInt(inner);
-                    const url = resolveNyscefUrl(page, window.nyscefConfig);
-                    if (url) {
-                        return '(<a href="' + url + '" target="_blank" style="color:#4fc3f7;text-decoration:underline;">' + inner + '</a>)';
-                    }
-                    return match;
+                escaped = escaped.replace(/(?<![a-zA-Z0-9§¶)\-])\((\d{2,}(?:\s*-\s*\d+)?(?:,\s*\d{2,}(?:\s*-\s*\d+)?)*)\)(?!\s*\d{3})/g, function(match, inner) {
+                    const parts = inner.split(/,\s*/);
+                    const linked = parts.map(function(part) {
+                        const page = parseInt(part);
+                        const url = resolveNyscefUrl(page, window.nyscefConfig);
+                        if (url) {
+                            return '<a href="' + url + '" target="_blank" style="color:#4fc3f7;text-decoration:underline;">' + part + '</a>';
+                        }
+                        return part;
+                    }).join(', ');
+                    return '(' + linked + ')';
                 });
             }
 
@@ -823,19 +854,13 @@
                 return `
                 <div style="margin-bottom:12px;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;" data-nyscef-key="${doc.type}">
                     <div style="color:#ff9b9b;font-size:0.85em;font-weight:600;margin-bottom:6px;">${label}: ${doc.filename}</div>
-                    <input type="text" class="nyscef-url" placeholder="NYSCEF URL or doc index"
-                           style="width:100%;padding:6px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;margin-bottom:4px;box-sizing:border-box;font-size:13px;">
-                    <div style="display:flex;gap:8px;">
-                        <div style="flex:1;">
-                            <label style="font-size:0.75em;color:#888;">First record page</label>
-                            <input type="number" class="nyscef-first-page" value="1" min="1"
-                                   style="width:100%;padding:4px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;box-sizing:border-box;">
-                        </div>
-                        <div style="flex:1;">
-                            <label style="font-size:0.75em;color:#888;">PDF page offset</label>
-                            <input type="number" class="nyscef-offset" value="0" min="0"
-                                   style="width:100%;padding:4px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;box-sizing:border-box;">
-                        </div>
+                    <label style="font-size:0.75em;color:#888;">NYSCEF document URL</label>
+                    <input type="text" class="nyscef-url" placeholder="Paste NYSCEF link"
+                           style="width:100%;padding:6px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;margin-bottom:6px;box-sizing:border-box;font-size:12px;">
+                    <div>
+                        <label style="font-size:0.75em;color:#888;">First record page in this volume</label>
+                        <input type="number" class="nyscef-first-page" value="1" min="1"
+                               style="width:100%;padding:4px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.2);color:#fff;box-sizing:border-box;">
                     </div>
                 </div>`;
             }).join('') + '<button class="btn btn-secondary" style="margin-top:8px;" onclick="saveNyscefConfig()">Save NYSCEF Config</button>';
@@ -851,9 +876,10 @@
                 if (url) {
                     volumes.push({
                         doc_key: el.dataset.nyscefKey,
+                        url: url,
                         doc_index: url,
                         first_page: parseInt(el.querySelector('.nyscef-first-page').value) || 1,
-                        page_offset: parseInt(el.querySelector('.nyscef-offset').value) || 0,
+                        page_offset: parseInt(el.querySelector('.nyscef-offset').value) || 1,
                     });
                 }
             });
@@ -885,9 +911,11 @@
                     data.nyscef_config.volumes.forEach(vol => {
                         const el = document.querySelector(`[data-nyscef-key="${vol.doc_key}"]`);
                         if (el) {
-                            el.querySelector('.nyscef-url').value = vol.doc_index;
+                            // Show full URL if stored, otherwise reconstruct from doc_index
+                            const displayUrl = vol.url || (vol.doc_index ? 'https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex=' + vol.doc_index : '');
+                            el.querySelector('.nyscef-url').value = displayUrl;
                             el.querySelector('.nyscef-first-page').value = vol.first_page;
-                            el.querySelector('.nyscef-offset').value = vol.page_offset;
+                            el.querySelector('.nyscef-offset').value = vol.page_offset || 1;
                         }
                     });
                     const statusEl = document.getElementById('nyscefStatus');
@@ -906,7 +934,7 @@
                 if (!vol.doc_index) continue;
                 const firstPage = vol.first_page || 1;
                 if (page >= firstPage) {
-                    const pdfPage = (page - firstPage) + 1 + (vol.page_offset || 0);
+                    const pdfPage = (page - firstPage) + (vol.page_offset || 0);
                     return 'https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex=' + encodeURIComponent(vol.doc_index) + '#page=' + pdfPage;
                 }
             }
@@ -993,6 +1021,11 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 formData.append('doc_type', docType);
+                // Include issue name for legal research uploads
+                const issueInput = document.querySelector(`.issue-name-input[data-for="${docType}"]`);
+                if (issueInput && issueInput.value.trim()) {
+                    formData.append('issue_name', issueInput.value.trim());
+                }
 
                 zone.style.opacity = '0.5';
                 zone.querySelector('.label').textContent = 'Uploading...';
@@ -1040,6 +1073,7 @@
         let nextResearchNum = 2;    // legal_research is primary, extras start at 2
 
         function createDynamicUploadZone(docType, label, containerSelector) {
+            const isLegalResearch = docType.startsWith('legal_research');
             const container = document.querySelector(containerSelector);
             const wrapper = document.createElement('div');
             wrapper.innerHTML = `
@@ -1048,6 +1082,7 @@
                     <div class="icon">📁</div>
                     <div class="label">${label}</div>
                 </div>
+                ${isLegalResearch ? `<input type="text" class="issue-name-input" data-for="${docType}" placeholder="Issue name (e.g., Negligence, Damages)" style="width: 100%; padding: 6px 10px; margin: 4px 0 8px 0; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #ccc; font-size: 0.85em;">` : ''}
                 <div id="doc-${docType}"></div>
             `;
             container.appendChild(wrapper);
@@ -1061,6 +1096,11 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 formData.append('doc_type', docType);
+                // Include issue name for legal research uploads
+                const issueInput = wrapper.querySelector('.issue-name-input');
+                if (issueInput && issueInput.value.trim()) {
+                    formData.append('issue_name', issueInput.value.trim());
+                }
                 zone.style.opacity = '0.5';
                 zone.querySelector('.label').textContent = 'Uploading...';
                 try {
@@ -1200,6 +1240,84 @@
                 status.textContent = 'Error: ' + e.message;
                 btn.disabled = false;
                 btn.textContent = 'Index Record';
+            }
+        }
+
+        // Witness Map functions
+        async function loadWitnessMap() {
+            try {
+                const resp = await fetch(`/project/${projectId}/witness-map`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    renderWitnessMap(data.witness_map || []);
+                }
+            } catch(e) { console.error('Error loading witness map:', e); }
+        }
+
+        function renderWitnessMap(entries) {
+            const list = document.getElementById('witnessMapList');
+            if (!entries || entries.length === 0) {
+                list.innerHTML = '<p style="color:#666;font-size:0.85em;">No witnesses detected yet. Click "Extract" after uploading transcripts.</p>';
+                document.getElementById('saveWitnessBtn').style.display = 'none';
+                return;
+            }
+            list.innerHTML = entries.map((w, i) => `
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;padding:6px;background:rgba(255,255,255,0.05);border-radius:6px;">
+                    <span style="flex:1;font-weight:600;color:#fff;font-size:0.9em;">${w.name}</span>
+                    <select class="witness-party" data-idx="${i}" style="padding:4px 8px;border-radius:4px;background:rgba(0,0,0,0.3);color:#fff;border:1px solid rgba(255,255,255,0.2);font-size:0.8em;">
+                        <option value="" ${!w.party ? 'selected' : ''}>Party?</option>
+                        <option value="plaintiff" ${w.party === 'plaintiff' ? 'selected' : ''}>Plaintiff</option>
+                        <option value="defendant" ${w.party === 'defendant' ? 'selected' : ''}>Defendant</option>
+                        <option value="nonparty" ${w.party === 'nonparty' ? 'selected' : ''}>Non-Party</option>
+                    </select>
+                    <input class="witness-role" data-idx="${i}" value="${w.role || ''}" placeholder="Role (e.g., treating physician)" style="width:140px;padding:4px 8px;border-radius:4px;background:rgba(0,0,0,0.3);color:#fff;border:1px solid rgba(255,255,255,0.2);font-size:0.8em;">
+                </div>
+            `).join('');
+            document.getElementById('saveWitnessBtn').style.display = 'block';
+            window._witnessEntries = entries;
+        }
+
+        async function extractWitnesses() {
+            const btn = document.getElementById('extractWitnessBtn');
+            const status = document.getElementById('witnessMapStatus');
+            btn.disabled = true;
+            btn.textContent = 'Extracting...';
+            status.textContent = '';
+            try {
+                const resp = await fetch(`/project/${projectId}/extract-witnesses`, { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    renderWitnessMap(data.witness_map || []);
+                    status.textContent = `Detected ${(data.witness_map || []).length} witnesses`;
+                } else {
+                    status.textContent = 'Error: ' + (data.error || 'extraction failed');
+                }
+            } catch(e) {
+                status.textContent = 'Error: ' + e.message;
+            }
+            btn.disabled = false;
+            btn.textContent = 'Extract Witnesses from Uploads';
+        }
+
+        async function saveWitnessMap() {
+            const entries = window._witnessEntries || [];
+            document.querySelectorAll('.witness-party').forEach(sel => {
+                entries[parseInt(sel.dataset.idx)].party = sel.value;
+            });
+            document.querySelectorAll('.witness-role').forEach(inp => {
+                entries[parseInt(inp.dataset.idx)].role = inp.value;
+            });
+            try {
+                const resp = await fetch(`/project/${projectId}/witness-map`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ witness_map: entries })
+                });
+                if (resp.ok) {
+                    document.getElementById('witnessMapStatus').textContent = 'Saved';
+                }
+            } catch(e) {
+                document.getElementById('witnessMapStatus').textContent = 'Error saving: ' + e.message;
             }
         }
 
@@ -1405,7 +1523,12 @@
                 const data = await response.json();
 
                 if (data.error) {
-                    errorEl.textContent = data.error;
+                    let msg = data.error;
+                    if (data.violations && data.violations.length > 0) {
+                        msg += '\n\nViolations:\n' + data.violations.map(v => '• ' + v).join('\n');
+                    }
+                    errorEl.textContent = msg;
+                    errorEl.style.whiteSpace = 'pre-wrap';
                     errorEl.style.display = 'block';
                     return;
                 }
@@ -1491,9 +1614,24 @@
             e.target.value = '';
         });
 
+        // Check if record index already exists
+        function checkRecordIndex() {
+            const recordIndex = {{ (project.record_index | length) if project.record_index else 0 }};
+            if (recordIndex > 0) {
+                const btn = document.getElementById('indexRecordBtn');
+                const status = document.getElementById('indexRecordStatus');
+                btn.textContent = 'Re-Index Record';
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-secondary');
+                status.innerHTML = '<span style="color:#00ff88;">&#10003; ' + recordIndex + ' facts indexed</span>';
+            }
+        }
+
         // Load existing data on page load
         loadDocuments();
         loadStructure();
+        loadWitnessMap();
+        checkRecordIndex();
 
         // Load existing analysis if available
         {% if project.analysis %}

@@ -7,22 +7,58 @@ Drafts appellate briefs (Appellant's, Respondent's, and Reply) using AI assistan
 import os
 import re
 import json
+import time
 import uuid
+import tempfile
 import threading
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, redirect, session
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
-from anthropic import Anthropic
+from anthropic import Anthropic, AuthenticationError, RateLimitError, APITimeoutError, APIStatusError
 import pdfplumber
+import dropbox
+from dropbox.exceptions import ApiError, AuthError
 from docx import Document as DocxDocument
 from src.utils.file_parser import parse_pdf_pages
 from src.processors.two_pass_processor import TwoPassProcessor
+from src.utils.qc_reporter import BriefQC, generate_qc_report
+from src.utils.citation_validator import (
+    extract_all_citations, validate_page_ranges, flag_violations,
+    get_record_page_ranges, generate_validation_report
+)
+from src.utils.transcript_parser import (
+    extract_witness_map as extract_witness_map_from_pdf,
+    extract_witness_roster_from_digests as extract_roster_from_digests,
+    build_witness_constraint, verify_attribution_framing
+)
 
 load_dotenv()
 
+# Protocol loader
+PROTOCOLS_DIR = Path(__file__).parent / 'protocols'
+
+def _load_protocol(name):
+    """Load a protocol .txt file from the protocols/ directory."""
+    path = PROTOCOLS_DIR / name
+    if path.exists():
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    return ''
+
+# Load config for Dropbox
+CONFIG_PATH = Path(__file__).parent / "config.json"
+def load_config():
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    return {}
+
+config = load_config()
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
+app.secret_key = os.urandom(24)  # For session management
 
 # Configuration
 BASE_DIR = Path(__file__).parent
@@ -30,6 +66,10 @@ PROJECTS_DIR = BASE_DIR / 'projects'
 PROJECTS_DIR.mkdir(exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'pdf', 'txt', 'docx'}
+
+# Dropbox OAuth settings
+DROPBOX_APP_KEY = config.get('dropbox_app_key', '')
+DROPBOX_APP_SECRET = config.get('dropbox_app_secret', '')
 
 # Allow large file uploads (500MB) and long timeouts for big PDFs
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max upload
@@ -77,15 +117,12 @@ BRIEF_TYPE_CONFIG = {
             {'key': 'existing_draft', 'label': 'Existing Draft (Your Work-in-Progress)', 'icon': '✏️'},
             {'key': 'appellant_brief', 'label': "Appellant's Opening Brief", 'icon': '📄'},
             {'key': 'lower_court_decision', 'label': 'Lower Court Decision', 'icon': '📄'},
+            {'key': 'record_vol_1', 'label': 'Record on Appeal Vol. 1', 'icon': '📁'},
+            {'key': 'record_vol_2', 'label': 'Record on Appeal Vol. 2', 'icon': '📁'},
             {'key': 'respondent_appendix', 'label': "Respondent's Appendix", 'icon': '📑'},
             {'key': 'legal_research', 'label': 'Legal Research', 'icon': '📚'},
         ],
         'additional_uploads': [
-            {'key': 'record_vol_1', 'label': 'Record Vol. 1'},
-            {'key': 'record_vol_2', 'label': 'Record Vol. 2'},
-            {'key': 'record_vol_3', 'label': 'Record Vol. 3'},
-            {'key': 'record_vol_4', 'label': 'Record Vol. 4'},
-            {'key': 'record_vol_5', 'label': 'Record Vol. 5'},
             {'key': 'appellant_appendix', 'label': "Appellant's Appendix"},
             {'key': 'legal_research_2', 'label': 'Legal Research 2'},
             {'key': 'legal_research_3', 'label': 'Legal Research 3'},
@@ -129,6 +166,78 @@ BRIEF_TYPE_CONFIG = {
 MAX_PRIMARY_CHARS = 200000    # ~50K tokens per primary doc
 MAX_SECONDARY_CHARS = 100000  # ~25K tokens per secondary doc
 MAX_TOTAL_CHARS = 380000      # ~130K tokens for docs, leaving room for prompt (~30K) + output (16K) within 200K context
+
+
+
+def _strip_opposing_brief_chrome(text):
+    """Strip cover page, TOC, attorney block, and printing specs from opposing brief.
+    These are formatting elements that the AI should never see or copy."""
+    if not text:
+        return text
+    lines = text.split('\n')
+    cleaned_lines = []
+    skip_until_substance = True
+    in_toc = False
+    in_attorney_block = False
+    in_printing_specs = False
+
+    for i, line in enumerate(lines):
+        upper = line.strip().upper()
+
+        # Skip printing specifications statement at the end
+        if 'PRINTING SPECIFICATIONS' in upper or 'PRINTING SPECIFICATION' in upper:
+            in_printing_specs = True
+            continue
+        if in_printing_specs:
+            continue
+
+        # Detect and skip TOC sections
+        if upper in ('TABLE OF CONTENTS', 'TABLE OF AUTHORITIES'):
+            in_toc = True
+            continue
+        if in_toc:
+            # TOC ends when we hit a substantive heading
+            if upper in ('PRELIMINARY STATEMENT', 'SUMMARY OF ARGUMENT', 'STATEMENT OF QUESTIONS PRESENTED',
+                         'STATEMENT OF THE CASE', 'STATEMENT OF FACTS', 'FACTS', 'ARGUMENT',
+                         'COUNTERSTATEMENT OF FACTS', 'COUNTERSTATEMENT OF QUESTIONS PRESENTED',
+                         'PROCEDURAL HISTORY', 'INTRODUCTION'):
+                in_toc = False
+                skip_until_substance = False
+                cleaned_lines.append(line)
+                continue
+            # Still in TOC — skip lines with page number patterns (dots or numbers at end)
+            if re.search(r'\.{3,}|…+|\d+\s*$', line.strip()) or not line.strip():
+                continue
+            # Non-TOC-looking line while in_toc — might be end of TOC
+            if len(line.strip()) > 5 and not re.search(r'\d+$', line.strip()):
+                in_toc = False
+                skip_until_substance = False
+
+        # Skip cover page / caption block (everything before first substantive heading)
+        if skip_until_substance:
+            if upper in ('PRELIMINARY STATEMENT', 'SUMMARY OF ARGUMENT', 'STATEMENT OF QUESTIONS PRESENTED',
+                         'STATEMENT OF THE CASE', 'STATEMENT OF FACTS', 'FACTS', 'ARGUMENT',
+                         'COUNTERSTATEMENT OF FACTS', 'COUNTERSTATEMENT OF QUESTIONS PRESENTED',
+                         'PROCEDURAL HISTORY', 'INTRODUCTION'):
+                skip_until_substance = False
+                cleaned_lines.append(line)
+                continue
+            continue
+
+        # Detect attorney signature blocks (firm names, addresses, phone numbers)
+        if re.match(r'^\s*(Respectfully submitted|Dated:)', line, re.IGNORECASE):
+            in_attorney_block = True
+            continue
+        if in_attorney_block:
+            continue
+
+        cleaned_lines.append(line)
+
+    result = '\n'.join(cleaned_lines).strip()
+    # If stripping removed too much (>90%), return original — something went wrong
+    if len(result) < len(text) * 0.1:
+        return text
+    return result
 
 
 def _truncate(text, max_chars):
@@ -398,87 +507,172 @@ MODELS = {
     'opus': 'claude-opus-4-20250514',
 }
 
-def call_claude(prompt: str, max_tokens: int = 4000, model: str = 'sonnet') -> str:
-    """Call Claude API with streaming to support long Opus requests"""
+def call_claude(prompt: str, max_tokens: int = 4000, model: str = 'sonnet', system: str = None) -> str:
+    """Call Claude API with streaming + exponential backoff retry.
+
+    Retries on rate limits (30s/60s/90s), overload 529 (30s/60s/90s),
+    timeouts (2s/4s/8s), and generic errors (2s/4s/8s).
+    Fails immediately on authentication errors.
+    """
     api_key = os.getenv('ANTHROPIC_API_KEY')
     if not api_key:
         return "ERROR: ANTHROPIC_API_KEY not set in .env file"
 
     model_id = MODELS.get(model, MODELS['sonnet'])
-    try:
-        client = Anthropic(api_key=api_key)
-        with client.messages.stream(
-            model=model_id,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}]
-        ) as stream:
-            result = stream.get_final_text()
-        return result
-    except Exception as e:
-        return f"ERROR: {str(e)}"
+    client = Anthropic(api_key=api_key)
+    max_retries = 3
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[API] Calling {model_id}, max_tokens={max_tokens}, prompt_len={len(prompt)}", flush=True)
+
+            kwargs = {
+                'model': model_id,
+                'max_tokens': max_tokens,
+                'messages': [{"role": "user", "content": prompt}],
+            }
+            if system:
+                kwargs['system'] = system
+
+            with client.messages.stream(**kwargs) as stream:
+                result = stream.get_final_text()
+
+            print(f"[API] Response received, length={len(result)}", flush=True)
+            return result
+
+        except AuthenticationError:
+            print("[API ERROR] Authentication failed, check ANTHROPIC_API_KEY", flush=True)
+            return "ERROR: Authentication failed — check ANTHROPIC_API_KEY"
+
+        except RateLimitError:
+            backoff = 30 * attempt
+            if attempt < max_retries:
+                print(f"[API] Retry {attempt}/{max_retries} after RateLimitError, waiting {backoff}s...", flush=True)
+                time.sleep(backoff)
+            else:
+                print(f"[API ERROR] RateLimitError after {max_retries} retries", flush=True)
+                return "ERROR: Rate limited after multiple retries. Wait a minute and try again."
+
+        except APIStatusError as e:
+            if e.status_code == 529:
+                backoff = 30 * attempt
+                if attempt < max_retries:
+                    print(f"[API] Retry {attempt}/{max_retries} after overload (529), waiting {backoff}s...", flush=True)
+                    time.sleep(backoff)
+                else:
+                    print(f"[API ERROR] Overloaded (529) after {max_retries} retries", flush=True)
+                    return "ERROR: API overloaded after multiple retries. Wait a minute and try again."
+            else:
+                print(f"[API ERROR] APIStatusError {e.status_code}: {e}", flush=True)
+                return f"ERROR: API error {e.status_code}: {str(e)}"
+
+        except APITimeoutError:
+            backoff = 2 ** attempt
+            if attempt < max_retries:
+                print(f"[API] Retry {attempt}/{max_retries} after timeout, waiting {backoff}s...", flush=True)
+                time.sleep(backoff)
+            else:
+                print(f"[API ERROR] Timeout after {max_retries} retries", flush=True)
+                return "ERROR: API timed out after multiple retries."
+
+        except Exception as e:
+            backoff = 2 ** attempt
+            if attempt < max_retries:
+                print(f"[API] Retry {attempt}/{max_retries} after {type(e).__name__}: {e}, waiting {backoff}s...", flush=True)
+                time.sleep(backoff)
+            else:
+                print(f"[API ERROR] {type(e).__name__} after {max_retries} retries: {e}", flush=True)
+                return f"ERROR: {str(e)}"
+
+
 
 
 def validate_citations(memo_text: str, *source_texts) -> str:
     """
     Validate case citations against source materials.
-    Checks every _Case v. Party_ citation to confirm the party names
-    appear somewhere in the uploaded source documents. Citations not
-    found in sources are tagged [UNVERIFIED CITATION].
+    Two checks:
+      1. Case NAME: plaintiff or defendant must appear in sources
+      2. Reporter NUMBERS: the exact reporter string (e.g. "202 AD3d 1294") must appear in sources
+    Unverified names get [UNVERIFIED CITATION]. Unverified reporter numbers get [CITE NUMBER UNVERIFIED].
     """
-    combined_sources = '\n'.join(t for t in source_texts if t).lower()
+    combined_sources = '\n'.join(t for t in source_texts if t)
+    combined_lower = combined_sources.lower()
 
-    if not combined_sources.strip():
+    if not combined_lower.strip():
         print("[CITATION CHECK] No source materials to validate against, skipping", flush=True)
         return memo_text
 
-    flagged = []
+    flagged_names = []
+    flagged_reporters = []
+
+    # Build set of all reporter strings found in sources (e.g. "202 AD3d 1294")
+    reporter_pattern = r'(\d+\s+(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d|NE[23]d)\s+\d+)'
+    source_reporters = set()
+    for m in re.finditer(reporter_pattern, combined_sources):
+        # Normalize whitespace
+        source_reporters.add(re.sub(r'\s+', ' ', m.group(1).strip()))
+
+    print(f"[CITATION CHECK] Found {len(source_reporters)} reporter citations in source documents", flush=True)
 
     def check_case(match):
         full_match = match.group(0)
         case_name = match.group(1).strip()
 
-        # Extract plaintiff (before v./v)
+        name_verified = False
+        reporter_verified = False
+
+        # --- Check 1: Case name in sources ---
         v_match = re.search(r'^(.+?)\s+v\.?\s+', case_name)
         if not v_match:
             return full_match
 
         plaintiff = v_match.group(1).strip()
-        plaintiff_words = plaintiff.split()
-
         skip = {'matter', 'of', 'in', 're', 'the', 'ex', 'rel', 'people', 'state'}
-        significant_p = [w for w in plaintiff_words if w.lower() not in skip]
+        significant_p = [w for w in plaintiff.split() if w.lower() not in skip]
 
-        if not significant_p:
-            return full_match
+        if significant_p:
+            p_name = significant_p[0].lower().rstrip('.,;:')
+            if len(p_name) >= 3 and re.search(r'\b' + re.escape(p_name) + r'\b', combined_lower):
+                name_verified = True
 
-        p_name = significant_p[0].lower().rstrip('.,;:')
+        if not name_verified:
+            d_match = re.search(r'v\.?\s+(.+)', case_name)
+            if d_match:
+                defendant = d_match.group(1).strip()
+                significant_d = [w for w in defendant.split() if w.lower() not in skip]
+                if significant_d:
+                    d_name = significant_d[0].lower().rstrip('.,;:')
+                    if len(d_name) >= 3 and re.search(r'\b' + re.escape(d_name) + r'\b', combined_lower):
+                        name_verified = True
 
-        if len(p_name) < 3:
-            return full_match
+        # --- Check 2: Reporter citation in sources ---
+        # Look for reporter citation right after this case name in the draft
+        after_pos = match.end()
+        after_text = memo_text[after_pos:after_pos + 80]
+        reporter_match = re.search(reporter_pattern, after_text)
+        if reporter_match:
+            draft_reporter = re.sub(r'\s+', ' ', reporter_match.group(1).strip())
+            if draft_reporter in source_reporters:
+                reporter_verified = True
 
-        # Check plaintiff name in sources (word boundary match)
-        if re.search(r'\b' + re.escape(p_name) + r'\b', combined_sources):
-            return full_match
+        # --- Apply flags ---
+        result = full_match
+        if not name_verified:
+            flagged_names.append(case_name)
+            print(f"[CITATION CHECK] UNVERIFIED NAME: {case_name}", flush=True)
+            result += ' [UNVERIFIED CITATION]'
+        elif not reporter_verified and reporter_match:
+            flagged_reporters.append(f"{case_name} -> {reporter_match.group(1)}")
+            print(f"[CITATION CHECK] UNVERIFIED REPORTER: {case_name} cited as {reporter_match.group(1)}", flush=True)
+            result += ' [CITE NUMBER UNVERIFIED]'
 
-        # Fallback: check defendant name
-        d_match = re.search(r'v\.?\s+(.+)', case_name)
-        if d_match:
-            defendant = d_match.group(1).strip()
-            defendant_words = defendant.split()
-            significant_d = [w for w in defendant_words if w.lower() not in skip]
-            if significant_d:
-                d_name = significant_d[0].lower().rstrip('.,;:')
-                if len(d_name) >= 3 and re.search(r'\b' + re.escape(d_name) + r'\b', combined_sources):
-                    return full_match
-
-        flagged.append(case_name)
-        print(f"[CITATION CHECK] UNVERIFIED: {case_name}", flush=True)
-        return full_match + ' [UNVERIFIED CITATION]'
+        return result
 
     result = re.sub(r'_([^_]+?v\.?\s+[^_]+?)_', check_case, memo_text)
 
-    if flagged:
-        print(f"[CITATION CHECK] Flagged {len(flagged)} unverified citation(s): {flagged}", flush=True)
+    total_flagged = len(flagged_names) + len(flagged_reporters)
+    if total_flagged:
+        print(f"[CITATION CHECK] Flagged {len(flagged_names)} unverified name(s), {len(flagged_reporters)} unverified reporter(s)", flush=True)
     else:
         print("[CITATION CHECK] All citations verified against source materials", flush=True)
 
@@ -641,7 +835,279 @@ def enforce_case_cites(draft_text: str, research_text: str) -> str:
     return result
 
 
-def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', opening_brief_text: str = '') -> str:
+def verify_attributions(draft_text: str, all_source_text: str) -> str:
+    """Verify witness attributions in the draft against source documents.
+    When multiple witnesses testify about similar topics, the model can
+    cross-wire which witness said what. This function detects those errors
+    by finding the attributed content in the sources and checking whether
+    the credited witness's name actually appears near that content."""
+    if not draft_text or not all_source_text:
+        return draft_text
+
+    source_lower = all_source_text.lower()
+
+    # Attribution patterns: "Dr. Name explained that...", "Name testified that..."
+    attribution_re = re.compile(
+        r'(?:Dr\.\s+|Mr\.\s+|Ms\.\s+|Mrs\.\s+)?'
+        r'([A-Z][a-z]{2,})'
+        r'\s+'
+        r'(?:testified|explained|stated|noted|indicated|acknowledged|admitted|confirmed|recalled|described|observed|opined|conceded|reported|related|recounted|clarified)'
+        r'\s+(?:that\s+|at\s+(?:his|her|their)\s+)?'
+        r'(.+?)'
+        r'(?:\([^)]*\)|\.(?:\s|$))',
+        re.DOTALL
+    )
+
+    skip_names = {
+        'plaintiff', 'defendant', 'movant', 'respondent', 'petitioner',
+        'appellant', 'court', 'justice', 'judge', 'honor', 'counsel',
+    }
+
+    all_matches = list(attribution_re.finditer(draft_text))
+    attributed_names = set()
+    for m in all_matches:
+        name = m.group(1)
+        if name.lower() not in skip_names:
+            attributed_names.add(name)
+
+    if len(attributed_names) < 2:
+        print(f"[ATTRIBUTION CHECK] Only {len(attributed_names)} attributed name(s), skipping cross-check", flush=True)
+        return draft_text
+
+    print(f"[ATTRIBUTION CHECK] Found {len(attributed_names)} attributed witnesses: {sorted(attributed_names)}", flush=True)
+
+    flagged = []
+    result = draft_text
+
+    for m in all_matches:
+        name = m.group(1)
+        content = m.group(2).strip()
+
+        if name.lower() in skip_names:
+            continue
+        if len(content) < 20:
+            continue
+
+        content_normalized = re.sub(r'\s+', ' ', content.lower()).strip()
+
+        words = content_normalized.split()
+        search_phrase = content_normalized
+        if len(words) > 8:
+            trim = max(1, len(words) // 5)
+            search_phrase = ' '.join(words[trim:-trim]) if trim < len(words) - trim else content_normalized
+
+        if len(search_phrase) < 15:
+            continue
+
+        pos = source_lower.find(search_phrase)
+        if pos == -1:
+            continue
+
+        window_start = max(0, pos - 5000)
+        window_end = min(len(source_lower), pos + len(search_phrase) + 1000)
+        window = source_lower[window_start:window_end]
+
+        name_lower = name.lower()
+        if name_lower in window:
+            continue
+
+        suggested = None
+        for other_name in attributed_names:
+            if other_name == name:
+                continue
+            if other_name.lower() in window:
+                suggested = other_name
+                break
+
+        if suggested:
+            flag_text = f" [VERIFY ATTRIBUTION: source may be {suggested}, not {name}]"
+            flagged.append((name, suggested, content[:60]))
+            print(f"[ATTRIBUTION CHECK] MISMATCH: draft credits {name}, source window has {suggested}", flush=True)
+        else:
+            flag_text = f" [VERIFY ATTRIBUTION: {name} not found near this content in sources]"
+            flagged.append((name, None, content[:60]))
+            print(f"[ATTRIBUTION CHECK] WARNING: {name} not found near attributed content", flush=True)
+
+        full_match = m.group(0)
+        flagged_version = full_match + flag_text
+        result = result.replace(full_match, flagged_version, 1)
+
+    if flagged:
+        print(f"[ATTRIBUTION CHECK] Flagged {len(flagged)} potential misattribution(s)", flush=True)
+    else:
+        print("[ATTRIBUTION CHECK] All attributions verified against source documents", flush=True)
+
+    return result
+
+
+def enforce_style_conformance(text: str) -> str:
+    """Strip AI-isms and enforce attorney voice patterns. Code-level, Claude can't ignore."""
+    result = text
+    replacements = 0
+
+    # Em dashes → commas (dead giveaway of AI)
+    if '—' in result:
+        count = result.count('—')
+        result = re.sub(r'\s*—\s*', ', ', result)
+        replacements += count
+
+    # AI filler phrases → remove or replace
+    ai_phrases = [
+        (r'\bIt is important to note that ', 'Indeed, '),
+        (r'\bIt bears noting that ', 'Indeed, '),
+        (r'\bSignificantly, ', 'Indeed, '),
+        (r'\bNotably, ', 'Indeed, '),
+        (r'\bFirst and foremost, ', 'First, '),
+        (r'\bIn conclusion, ', 'Based upon the foregoing, '),
+        (r'\bTo summarize, ', 'Based upon the foregoing, '),
+        (r'\bIn summary, ', 'Based upon the foregoing, '),
+        (r'\bIt should be noted that ', 'Indeed, '),
+        (r'\bIt is worth noting that ', 'Indeed, '),
+        (r'\bIt is noteworthy that ', 'Indeed, '),
+        (r'\bThis is because ', 'Indeed, '),
+        (r'\bAs such, ', 'Under these circumstances, '),
+    ]
+    for pattern, replacement in ai_phrases:
+        new_result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+        if new_result != result:
+            replacements += 1
+            result = new_result
+
+    # Fix period placement before citations: "issue. (See..." → "issue (see..."
+    result = re.sub(r'\.\s+\(([Ss]ee,?\s)', r' (\1', result)
+
+    if replacements:
+        print(f"[STYLE CONFORMANCE] Fixed {replacements} AI-ism(s)", flush=True)
+
+    return result
+
+
+def consolidate_transcript_cites(draft_text: str) -> str:
+    """Merge adjacent/overlapping line ranges within transcript citations.
+
+    (Tr. at 359:1-5, 359:6-8)  ->  (Tr. at 359:1-8)
+    (Tr. at 100:3-5, 100:10-12)  ->  unchanged (non-adjacent)
+    (Tr. at 100:1-5, 101:1-3)  ->  unchanged (different pages)
+    (Tr. 11/21/25 at 42:1-5, 42:6-10)  ->  (Tr. 11/21/25 at 42:1-10)
+    """
+    if not draft_text:
+        return draft_text
+
+    # Match a full transcript citation parenthetical
+    cite_re = re.compile(
+        r'\(Tr\.(\s+\d{1,2}/\d{1,2}/\d{2,4})?\s+at\s+'
+        r'([\d:,\s–\-]+)'
+        r'\)'
+    )
+
+    # Parse individual page:line refs from the inner text
+    ref_re = re.compile(r'(\d+):(\d+)(?:\s*[-–]\s*(\d+))?')
+
+    count = 0
+
+    def _consolidate(match):
+        nonlocal count
+        date_part = match.group(1) or ''
+        inner = match.group(2).strip()
+
+        refs = []
+        for rm in ref_re.finditer(inner):
+            page = int(rm.group(1))
+            start = int(rm.group(2))
+            end = int(rm.group(3)) if rm.group(3) else start
+            refs.append((page, start, end))
+
+        if len(refs) < 2:
+            return match.group(0)
+
+        refs.sort(key=lambda r: (r[0], r[1]))
+
+        merged = [refs[0]]
+        for page, start, end in refs[1:]:
+            prev_page, prev_start, prev_end = merged[-1]
+            if page == prev_page and start <= prev_end + 2:
+                merged[-1] = (prev_page, prev_start, max(prev_end, end))
+            else:
+                merged.append((page, start, end))
+
+        if len(merged) == len(refs):
+            return match.group(0)
+
+        count += 1
+
+        parts = []
+        for page, start, end in merged:
+            if start == end:
+                parts.append(f'{page}:{start}')
+            else:
+                parts.append(f'{page}:{start}-{end}')
+
+        return f'(Tr.{date_part} at {", ".join(parts)})'
+
+    result = cite_re.sub(_consolidate, draft_text)
+
+    if count:
+        print(f"[CITE CONSOLIDATE] Merged line ranges in {count} transcript citation(s)", flush=True)
+
+    return result
+
+
+def consolidate_bare_page_cites(draft_text: str) -> str:
+    """Merge adjacent bare page citations for appellate records.
+
+    (123, 124, 125)  ->  (123-125)
+    (10, 12, 13, 14)  ->  (10, 12-14)
+    """
+    if not draft_text:
+        return draft_text
+
+    # Match parenthetical with 2+ bare page numbers separated by commas
+    cite_re = re.compile(r'\((\d{1,4}(?:\s*,\s*\d{1,4})+)\)')
+
+    count = 0
+
+    def _consolidate_pages(match):
+        nonlocal count
+        inner = match.group(1)
+        pages = [int(p.strip()) for p in inner.split(',')]
+
+        if len(pages) < 2:
+            return match.group(0)
+
+        pages.sort()
+
+        # Merge consecutive sequences
+        ranges = [(pages[0], pages[0])]
+        for p in pages[1:]:
+            prev_start, prev_end = ranges[-1]
+            if p == prev_end + 1:
+                ranges[-1] = (prev_start, p)
+            else:
+                ranges.append((p, p))
+
+        if len(ranges) == len(pages):
+            return match.group(0)  # No merges
+
+        count += 1
+
+        parts = []
+        for start, end in ranges:
+            if start == end:
+                parts.append(str(start))
+            else:
+                parts.append(f'{start}-{end}')
+
+        return f'({", ".join(parts)})'
+
+    result = cite_re.sub(_consolidate_pages, draft_text)
+
+    if count:
+        print(f"[CITE CONSOLIDATE] Merged {count} bare page citation range(s)", flush=True)
+
+    return result
+
+
+def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', opening_brief_text: str = '', all_source_text: str = '') -> str:
     """Post-processing guardrails for drafted briefs. Validates and fixes output programmatically.
     This is code, not a prompt — Claude can't ignore it."""
 
@@ -699,6 +1165,21 @@ def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', o
     result = re.sub(r'(\d+\s+(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d)\s+\d+)\s*\((\d{1,2}(?:st|d|th)\s+Dept\s+\d{4})\)',
                     r'\1 [\2]', result)
 
+    # 5.5. Wrap bare case citations in parentheses
+    # Matches: _Case Name_, 123 AD3d 456 [Dept Year] NOT already inside parens
+    # Must run AFTER bracket fix (step 5) so [Dept Year] is already correct
+    reporters = r'(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d|NE[23]d)'
+    bare_cite = rf'(?<!\()(_[^_]+_,?\s+\d+\s+{reporters}\s+\d+\s*\[[^\]]+\])'
+    result = re.sub(bare_cite, r'(\1)', result)
+    # Also catch bare cites without underscored case names (plain text case names)
+    bare_cite_plain = rf'(?<!\()([A-Z][A-Za-z\s\'.]+\s+v\.?\s+[A-Za-z\s\'.]+,\s+\d+\s+{reporters}\s+\d+\s*\[[^\]]+\])'
+    result = re.sub(bare_cite_plain, r'(\1)', result)
+
+    # 5.6. Consolidate adjacent transcript line ranges
+    result = consolidate_transcript_cites(result)
+    # Also consolidate bare page cites for appellate records
+    result = consolidate_bare_page_cites(result)
+
     # 6. Enforce paragraph cites (only for appellant/respondent briefs, not reply)
     # Reply briefs have many pure argument paragraphs that don't need record cites
     if brief_type != 'reply':
@@ -748,6 +1229,13 @@ def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', o
             result = re.sub(r'\bappellants\b', 'plaintiffs', result)
             if replaced:
                 print(f"[TERMINOLOGY] Replaced {replaced} 'appellant' → 'plaintiff' to match opening brief", flush=True)
+
+    # 9. Verify witness attributions
+    if all_source_text:
+        result = verify_attributions(result, all_source_text)
+
+    # 10. Style conformance — strip AI-isms, enforce attorney voice
+    result = enforce_style_conformance(result)
 
     return result
 
@@ -844,6 +1332,7 @@ def upload_document(project_id):
 
     file = request.files['file']
     doc_type = request.form.get('doc_type', 'other')
+    issue_name = request.form.get('issue_name', '').strip()
 
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
@@ -868,6 +1357,12 @@ def upload_document(project_id):
         'char_count': len(text)
     }
 
+    # Store case law issue grouping
+    if issue_name and (doc_type == 'legal_research' or doc_type.startswith('legal_research_')):
+        if 'case_law_issues' not in project:
+            project['case_law_issues'] = {}
+        project['case_law_issues'][doc_type] = issue_name
+
     # If existing_draft, also save it as the full_brief so revise works immediately
     if doc_type == 'existing_draft':
         if 'drafted_sections' not in project:
@@ -880,12 +1375,21 @@ def upload_document(project_id):
 
     save_project(project_id, project)
 
+    # Attempt Dropbox shared link generation
+    dropbox_link = get_dropbox_shared_link(filename)
+    if dropbox_link:
+        project['documents'][doc_type]['dropbox_link'] = dropbox_link
+        save_project(project_id, project)
+        print(f"[DROPBOX] Shared link for {filename}: {dropbox_link}", flush=True)
+
     response = {
         'success': True,
         'doc_type': doc_type,
         'filename': filename,
         'char_count': len(text)
     }
+    if dropbox_link:
+        response['dropbox_link'] = dropbox_link
 
     # Include text for existing_draft so frontend can display it immediately
     if doc_type == 'existing_draft':
@@ -924,12 +1428,12 @@ def _parse_analysis_json(result):
         return {'arguments': [], 'raw_response': result}
 
 
-def _analyze_for_appellant(docs):
+def _analyze_for_appellant(docs, case_law_issues=None):
     """Analyze lower court decision for appealable errors"""
     decision_text = docs.get('lower_court_decision', {}).get('text', '')
     transcript_text = docs.get('trial_transcript', {}).get('text', '')
     appendix_text = docs.get('appellant_appendix', {}).get('text', '')
-    research_text = _gather_legal_research(docs)
+    research_text = _gather_legal_research(docs, case_law_issues)
     record_combined = _gather_record_volumes(docs)
 
     # Fit documents within token budget
@@ -939,7 +1443,7 @@ def _analyze_for_appellant(docs):
         ('APPELLANT\'S APPENDIX', appendix_text, 'secondary'),
         ('RECORD ON APPEAL', record_combined, 'primary'),
         ('LEGAL RESEARCH', research_text, 'secondary'),
-    ])
+    ], max_total=MAX_TOTAL_CHARS)
 
     doc_sections = "\n\n".join(f"{label}:\n{text}" for label, text in fitted if text)
 
@@ -990,12 +1494,12 @@ Respond ONLY with valid JSON."""
     return call_claude(prompt, max_tokens=6000)
 
 
-def _analyze_for_respondent(docs):
+def _analyze_for_respondent(docs, case_law_issues=None):
     """Analyze appellant's brief for weaknesses to defend the lower court decision"""
-    appellant_text = docs.get('appellant_brief', {}).get('text', '')
+    appellant_text = _strip_opposing_brief_chrome(docs.get('appellant_brief', {}).get('text', ''))
     decision_text = docs.get('lower_court_decision', {}).get('text', '')
     appendix_text = docs.get('respondent_appendix', {}).get('text', '')
-    research_text = _gather_legal_research(docs)
+    research_text = _gather_legal_research(docs, case_law_issues)
     record_combined = _gather_record_volumes(docs)
 
     # Fit documents within token budget
@@ -1005,7 +1509,7 @@ def _analyze_for_respondent(docs):
         ('RESPONDENT\'S APPENDIX', appendix_text, 'secondary'),
         ('RECORD ON APPEAL', record_combined, 'primary'),
         ('LEGAL RESEARCH', research_text, 'secondary'),
-    ])
+    ], max_total=MAX_TOTAL_CHARS)
 
     doc_sections = "\n\n".join(f"{label}:\n{text}" for label, text in fitted if text)
 
@@ -1072,7 +1576,7 @@ def _analyze_for_reply(docs):
     fitted = _fit_documents([
         ('opening', opening_text, 'primary'),
         ('respondent', respondent_text, 'primary'),
-    ])
+    ], max_total=MAX_TOTAL_CHARS)
     opening_text = fitted[0][1] or ''
     respondent_text = fitted[1][1] or ''
 
@@ -1158,10 +1662,11 @@ def analyze_arguments(project_id):
             return jsonify({'error': 'Opening brief not uploaded'}), 400
 
     # Dispatch to type-specific analysis
+    cli = project.get('case_law_issues', {})
     if brief_type == 'appellant':
-        result = _analyze_for_appellant(docs)
+        result = _analyze_for_appellant(docs, cli)
     elif brief_type == 'respondent':
-        result = _analyze_for_respondent(docs)
+        result = _analyze_for_respondent(docs, cli)
     else:
         result = _analyze_for_reply(docs)
 
@@ -1227,7 +1732,7 @@ def resolve_nyscef_url(page_num, nyscef_config):
         offset = vol.get('page_offset', 0)
         if not doc_index or page_num < first_page:
             continue
-        pdf_page = (page_num - first_page) + 1 + offset
+        pdf_page = (page_num - first_page) + offset
         return f"https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex={doc_index}#page={pdf_page}"
     return None
 
@@ -1242,14 +1747,16 @@ def save_nyscef_config(project_id):
     data = request.json or {}
     volumes = []
     for vol in data.get('volumes', []):
-        doc_index = vol.get('doc_index', '').strip()
+        raw_url = vol.get('url', vol.get('doc_index', '')).strip()
+        doc_index = raw_url
         if 'docIndex=' in doc_index:
             doc_index = doc_index.split('docIndex=')[1].split('#')[0].split('&')[0]
         volumes.append({
             'doc_key': vol.get('doc_key', ''),
+            'url': raw_url,
             'doc_index': doc_index,
             'first_page': int(vol.get('first_page', 1)),
-            'page_offset': int(vol.get('page_offset', 0)),
+            'page_offset': int(vol.get('page_offset', 1)),
         })
 
     project['nyscef_config'] = {'volumes': volumes}
@@ -1489,7 +1996,27 @@ Before submitting your draft, check EVERY paragraph:
      If NO → Remove all markdown
 
 IF ANY CHECK FAILS, FIX IT BEFORE OUTPUTTING.
-================================================================================"""
+================================================================================
+
+"""
+
+
+def _build_anti_hallucination_block():
+    """Mandatory anti-hallucination rules as a standalone, prominent prompt section.
+    Kept separate from drafting protocol and writing style so Claude treats it
+    as a top-level mandatory constraint, not mere stylistic guidance."""
+    return """
+################################################################################
+## MANDATORY ANTI-HALLUCINATION RULES — VIOLATION = MALPRACTICE              ##
+## These rules OVERRIDE all other instructions. Never relax them.            ##
+################################################################################
+
+""" + _load_protocol('anti_hallucination.txt') + """
+
+################################################################################
+## END MANDATORY ANTI-HALLUCINATION RULES                                    ##
+################################################################################
+"""
 
 
 def _build_writing_style():
@@ -1590,6 +2117,59 @@ QUOTATION MARKS — SACRED:
 - NEVER convert a direct quote into a paraphrase by dropping the quotes
 - If the source material has language in quotes, keep it in quotes in the brief
 - Adding quotation marks to language that was not quoted is equally wrong
+
+═══════════════════════════════════════════════════════════════
+ATTORNEY VOICE — MANDATORY STYLE PATTERNS
+═══════════════════════════════════════════════════════════════
+
+You MUST write in the attorney's distinctive voice. These patterns are derived from
+4,020 documents and 430,145 paragraphs spanning 25 years of legal writing.
+
+SIGNATURE PHRASES — USE THESE NATURALLY THROUGHOUT:
+- "We respectfully submit" — primary advocacy phrase, use to frame key conclusions and transitions
+- "Moreover," / "In addition," — additive layering transitions to start sentences
+- "Indeed," — emphasis transition at sentence start to drive home points
+- "It is well settled that" / "It is black letter law that" — introduce established legal principles
+- "Contrary to [party]'s assertions" — rebuttal opener
+- "is unavailing" / "is without merit" / "is baseless" — dismiss opposing arguments
+- "Under these circumstances" / "In the case at bar" — pivot to application
+- "Regardless," — introduce alternative/independent argument
+- "fails to address" / "fails to take into consideration" — identify gaps in opposing papers
+- "Based upon the foregoing" — conclusion opener
+- "should be reversed" / "warrants reversal" — appellate conclusion
+- "abuse of discretion" — standard of review
+
+STRUCTURAL ARGUMENT PATTERNS — USE THESE TEMPLATES:
+
+1. OPPONENT REBUTTAL: "And, contrary to [party]'s assertions, [rule with quoted authority] ([lead case]; [string cite]). Indeed, [elaboration or second quoted rule] ([additional cites]). In addition, [statute or procedural rule]."
+
+2. CREDIBILITY ATTACK: "[Party]'s contention that [X] is unavailing. Indeed, it is well settled that [legal rule] ([pattern jury instruction or treatise], citing, [string cite])."
+
+3. CASE DISTINCTION: "We respectfully submit that [case] is inapplicable. It is uncontested that [factual distinction 1]. Moreover, [factual distinction 2]. It is black letter law that [rule] ([lead case], quoting [source]; [string cite]). Conversely, at bar [application]. Thus, there can be no dispute that [case] is inapplicable."
+
+4. FACTUAL DEMOLITION: "[Party] submitted [evidence]. However, [witness] stated that [contradicting fact] ([record cite]). It was uncontested that [devastating fact] ([string cite establishing legal consequence])."
+
+5. STANDARD OF REVIEW: "[Quoted standard with lead case]. [Second quoted formulation] ([lead case]; see also [5-10 cases]; see generally [10+ cases])."
+
+6. CONCLUSION: "We respectfully submit that the order should be reversed. [State error]. However, this is not a correct statement of the law. [Correct rule with string cite]. We respectfully submit that [party] failed to meet [its/their] burden. Regardless, [alternative argument]. In addition, [third layer]."
+
+STRING CITATION STYLE:
+- Stack 5-15+ cases separated by semicolons in a single parenthetical
+- Signal hierarchy: see → see also → see generally → cf. → accord → citing
+- Include parenthetical descriptions for key cases, bare cites for supporting weight
+- NY state format: [2d Dept. 2011]; Federal format: (2d Cir. 2013)
+
+ANTI-PATTERNS — NEVER DO THESE:
+- NEVER use em dashes (—). Use commas instead. Hyphens in compound words are fine.
+- NEVER write "It is important to note" or "Significantly" — these are AI filler phrases
+- NEVER write "First and foremost" — not in the attorney's vocabulary
+- NEVER write "It bears noting" — not in the attorney's vocabulary
+- NEVER use bullet points in the body of briefs — always continuous prose
+- NEVER use passive hedging ("it could be argued") — take definitive positions
+- NEVER write "In conclusion" — use "Based on/upon the foregoing" instead
+- NEVER start multiple consecutive paragraphs with "The" — use transitions (Moreover, Indeed, In addition)
+- NEVER write single-sentence paragraphs in argument sections — build substantial paragraphs (3-7 sentences)
+- NEVER separate the period from the citation: YES: "issue (Tr. at 127:6-7)." NO: "issue. (Tr. at 127:6-7)"
 """
 
 
@@ -1649,7 +2229,7 @@ def _draft_appellant_brief_structured(project, docs, structure, drafting_instruc
     """Structured drafting for appellant's brief — skips extraction passes"""
     decision_text = _truncate(docs.get('lower_court_decision', {}).get('text', ''), MAX_PRIMARY_CHARS)
     transcript_text = _truncate(docs.get('trial_transcript', {}).get('text', ''), MAX_SECONDARY_CHARS)
-    research_text = _truncate(_gather_legal_research(docs), MAX_SECONDARY_CHARS)
+    research_text = _truncate(_gather_legal_research(docs, project.get('case_law_issues', {})), MAX_SECONDARY_CHARS)
     existing_draft = _truncate(docs.get('existing_draft', {}).get('text', ''), MAX_PRIMARY_CHARS)
     record_combined = _gather_record_volumes(docs)
 
@@ -1711,6 +2291,8 @@ Respondent: {project.get('respondent', '')}
    Do NOT use "Counter-Statement" or "Counterstatement" — those are for respondent's briefs.
    The fact section MUST be titled "STATEMENT OF THE CASE" — nothing else.
 
+{_build_anti_hallucination_block()}
+
 {_build_drafting_protocol()}
 
 {_build_writing_style()}
@@ -1720,16 +2302,23 @@ Respondent: {project.get('respondent', '')}
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(prompt, max_tokens=16000, model=model)
-    final_brief = guardrail_brief(final_brief, 'appellant', research_text)
+    all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
+    final_brief = guardrail_brief(final_brief, 'appellant', research_text, all_source_text=all_source_text)
 
-    return final_brief, {'drafting_mode': 'structured'}
+    # Run QC report
+    qc = BriefQC()
+    qc_results = qc.run_qc(final_brief)
+    qc_report = generate_qc_report(qc_results)
+    print(f"[QC] {qc_report}", flush=True)
+
+    return final_brief, {'drafting_mode': 'structured', 'qc_report': qc_report}
 
 
 def _draft_respondent_brief_structured(project, docs, structure, drafting_instructions='', model='sonnet'):
     """Structured drafting for respondent's brief — skips extraction passes"""
-    appellant_text = _truncate(docs.get('appellant_brief', {}).get('text', ''), MAX_PRIMARY_CHARS)
+    appellant_text = _truncate(_strip_opposing_brief_chrome(docs.get('appellant_brief', {}).get('text', '')), MAX_PRIMARY_CHARS)
     decision_text = _truncate(docs.get('lower_court_decision', {}).get('text', ''), MAX_PRIMARY_CHARS)
-    research_text = _truncate(_gather_legal_research(docs), MAX_SECONDARY_CHARS)
+    research_text = _truncate(_gather_legal_research(docs, project.get('case_law_issues', {})), MAX_SECONDARY_CHARS)
     existing_draft = _truncate(docs.get('existing_draft', {}).get('text', ''), MAX_PRIMARY_CHARS)
     record_combined = _gather_record_volumes(docs)
 
@@ -1754,11 +2343,17 @@ def _draft_respondent_brief_structured(project, docs, structure, drafting_instru
 """
         drafting_task = "Complete and polish the attorney's existing draft following the structure provided."
 
+    # Gather co-respondent briefs (friendly party — source of arguments and cases)
+    co_respondent_briefs = _gather_respondent_briefs(docs, sanitize=False)
+    co_respondent_text = '\n\n'.join(text for _, text, _ in co_respondent_briefs)
+    co_respondent_text = _truncate(co_respondent_text, MAX_SECONDARY_CHARS) if co_respondent_text else ''
+
     # Fit supplementary documents
     doc_items = [
         ('APPELLANT\'S OPENING BRIEF (ADVOCACY — NOT EVIDENCE)', appellant_text, 'primary'),
         ('LOWER COURT DECISION', decision_text, 'primary'),
         ('RECORD ON APPEAL', record_combined, 'primary'),
+        ('CO-RESPONDENT\'S BRIEF (FRIENDLY PARTY — USE THEIR ARGUMENTS AND CASES)', co_respondent_text, 'secondary'),
         ('LEGAL RESEARCH', research_text, 'secondary'),
     ] + _gather_additional_docs(docs)
     fitted = _fit_documents(doc_items)
@@ -1791,6 +2386,8 @@ Respondent: {project.get('respondent', '')}
    - Do NOT quote appellant's brief and cite record page numbers as if you verified the record
    - When referencing what appellant argues, ATTRIBUTE IT: "Appellant argues..." or "Appellant contends..."
 
+{_build_anti_hallucination_block()}
+
 {_build_drafting_protocol()}
 
 {_build_writing_style()}
@@ -1800,9 +2397,16 @@ Respondent: {project.get('respondent', '')}
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(prompt, max_tokens=16000, model=model)
-    final_brief = guardrail_brief(final_brief, 'respondent', research_text)
+    all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
+    final_brief = guardrail_brief(final_brief, 'respondent', research_text, all_source_text=all_source_text)
 
-    return final_brief, {'drafting_mode': 'structured'}
+    # Run QC report
+    qc = BriefQC()
+    qc_results = qc.run_qc(final_brief)
+    qc_report = generate_qc_report(qc_results)
+    print(f"[QC] {qc_report}", flush=True)
+
+    return final_brief, {'drafting_mode': 'structured', 'qc_report': qc_report}
 
 
 def _sanitize_respondent_brief(text):
@@ -2035,7 +2639,7 @@ def _draft_reply_brief_structured(project, docs, structure, drafting_instruction
     respondent_briefs = _gather_respondent_briefs(docs)
     existing_draft = _truncate(docs.get('existing_draft', {}).get('text', ''), MAX_PRIMARY_CHARS)
     record_combined = _gather_record_volumes(docs)
-    research_text = _truncate(_gather_legal_research(docs), MAX_SECONDARY_CHARS)
+    research_text = _truncate(_gather_legal_research(docs, project.get('case_law_issues', {})), MAX_SECONDARY_CHARS)
 
     # Use pre-processed summaries if available
     summaries = project.get('summaries', {})
@@ -2082,6 +2686,8 @@ def _draft_reply_brief_structured(project, docs, structure, drafting_instruction
     resp_count = len(respondent_briefs)
     resp_note = f"There are {resp_count} respondent briefs. You must address arguments from ALL of them." if resp_count > 1 else ""
 
+    witness_constraint = _build_witness_constraint_for_project(project)
+
     prompt = f"""You are an expert appellate attorney {"completing" if existing_draft else "drafting"} a REPLY BRIEF FOR APPELLANTS.
 
 CRITICAL — YOU ARE WRITING FOR THE APPELLANTS (THE PARTY THAT LOST BELOW).
@@ -2099,6 +2705,8 @@ Court: {project.get('court', '')}
 Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
+
+{witness_constraint}
 
 {structure_block}
 
@@ -2123,6 +2731,8 @@ Respondent: {project.get('respondent', '')}
    - Do NOT quote respondent's brief and cite record page numbers as if you verified the record
    - When referencing what respondent argues, ATTRIBUTE IT: "Respondent argues..." or "Respondent contends..."
 
+{_build_anti_hallucination_block()}
+
 {_build_drafting_protocol()}
 
 {_build_writing_style()}
@@ -2132,9 +2742,31 @@ Respondent: {project.get('respondent', '')}
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(prompt, max_tokens=16000, model=model)
-    final_brief = guardrail_brief(final_brief, 'reply', research_text, opening_brief_text=full_opening_text)
+    all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
+    final_brief = guardrail_brief(final_brief, 'reply', research_text, opening_brief_text=full_opening_text, all_source_text=all_source_text)
 
-    return final_brief, {'drafting_mode': 'structured'}
+    # Verify witness attribution framing
+    if project.get('witness_map'):
+        final_brief = verify_attribution_framing(final_brief, {'entries': project['witness_map']})
+
+    # Run QC report
+    qc = BriefQC()
+    qc_results = qc.run_qc(final_brief)
+    qc_report = generate_qc_report(qc_results)
+    print(f"[QC] {qc_report}", flush=True)
+
+    # Run citation validation
+    record_ranges = get_record_page_ranges(docs)
+    if record_ranges:
+        cites = extract_all_citations(final_brief)
+        validation = validate_page_ranges(cites, record_ranges)
+        final_brief = flag_violations(final_brief, validation)
+        cite_report = generate_validation_report(validation)
+        print(f"[CITE VALIDATION] {cite_report}", flush=True)
+    else:
+        cite_report = ''
+
+    return final_brief, {'drafting_mode': 'structured', 'qc_report': qc_report, 'citation_report': cite_report}
 
 
 def _gather_record_volumes(docs):
@@ -2147,16 +2779,43 @@ def _gather_record_volumes(docs):
     return "\n\n".join(record_texts) if record_texts else ""
 
 
-def _gather_legal_research(docs):
-    """Collect all legal research texts (legal_research, legal_research_2, etc.)"""
-    research_texts = []
+def _gather_legal_research(docs, case_law_issues=None):
+    """Collect all legal research texts (legal_research, legal_research_2, etc.)
+    Groups by issue name if case_law_issues mapping is provided."""
+    case_law_issues = case_law_issues or {}
+
+    # Collect research docs with their issue tags
+    by_issue = {}  # issue_name -> list of (label, text)
+    ungrouped = []  # (label, text) for docs without an issue
+
     for key, doc in docs.items():
         if key == 'legal_research' or key.startswith('legal_research_'):
-            label = key.replace('_', ' ').title()
+            label = doc.get('filename', key.replace('_', ' ').title())
             text = doc.get('text', '')
-            if text:
-                research_texts.append(f"--- {label} ---\n{text}")
-    return "\n\n".join(research_texts) if research_texts else ""
+            if not text:
+                continue
+            issue = case_law_issues.get(key, '')
+            if issue:
+                if issue not in by_issue:
+                    by_issue[issue] = []
+                by_issue[issue].append((label, text))
+            else:
+                ungrouped.append((label, text))
+
+    parts = []
+
+    # Grouped research first
+    for issue_name, entries in by_issue.items():
+        section = f"{'=' * 60}\nISSUE: {issue_name}\n{'=' * 60}"
+        for label, text in entries:
+            section += f"\n\n--- {label} ---\n{text}"
+        parts.append(section)
+
+    # Ungrouped research
+    for label, text in ungrouped:
+        parts.append(f"--- {label} ---\n{text}")
+
+    return "\n\n".join(parts) if parts else ""
 
 
 @app.route('/project/<project_id>/draft', methods=['POST'])
@@ -2176,7 +2835,7 @@ def draft_section(project_id):
     docs = project.get('documents', {})
     analysis = project.get('analysis', {})
     record_combined = _gather_record_volumes(docs)
-    research_text = _gather_legal_research(docs)
+    research_text = _gather_legal_research(docs, project.get('case_law_issues', {}))
 
     # Build argument info — prefer structure Points over analysis
     argument_info = ""
@@ -2253,7 +2912,7 @@ Weaknesses to Exploit in Reply: {arg.get('weaknesses', '')}
     elif brief_type == 'respondent':
         brief_role = "a respondent's brief"
         doc_items = [
-            ('APPELLANT\'S OPENING BRIEF', docs.get('appellant_brief', {}).get('text', ''), 'primary'),
+            ('APPELLANT\'S OPENING BRIEF (OPPOSING PARTY — REBUT THIS)', _strip_opposing_brief_chrome(docs.get('appellant_brief', {}).get('text', '')), 'primary'),
             ('LOWER COURT DECISION', docs.get('lower_court_decision', {}).get('text', ''), 'primary'),
             ('RESPONDENT\'S APPENDIX', docs.get('respondent_appendix', {}).get('text', ''), 'secondary'),
             ('RECORD ON APPEAL', record_combined, 'primary'),
@@ -2323,6 +2982,8 @@ DOCUMENTS PROVIDED:
 
 {doc_context}
 
+{_build_anti_hallucination_block()}
+
 {_build_drafting_protocol()}
 
 {_build_writing_style()}
@@ -2347,9 +3008,9 @@ Draft the section now:"""
     # Insert full case citations from uploaded legal research
     result = enforce_case_cites(result, research_text)
 
-    # Citation validation disabled - too many false positives
-    # source_texts = [text for label, text in fitted if text]
-    # result = validate_citations(result, *source_texts)
+    # Citation validation — checks case names AND reporter numbers against sources
+    source_texts = [text for label, text in fitted if text]
+    result = validate_citations(result, *source_texts)
 
     section_key = f"{section_type}_{argument_number}" if section_type == 'argument' else section_type
     project['drafted_sections'][section_key] = {
@@ -2407,7 +3068,7 @@ def _build_record_index(docs, opening_brief_text='', progress_callback=None):
         if points:
             focus = "LEGAL ISSUES ON APPEAL:\n" + "\n".join(p.strip() for p in points)
 
-    # Chunk pages (20 per chunk)
+    # Chunk pages (20 per chunk for Claude's context window)
     CHUNK_SIZE = 20
     chunks = []
     for i in range(0, len(pages), CHUNK_SIZE):
@@ -2421,8 +3082,6 @@ def _build_record_index(docs, opening_brief_text='', progress_callback=None):
         progress_callback('extraction', 0, total_chunks, f'Indexing record: {len(pages)} pages in {total_chunks} chunks')
 
     # Extract facts from each chunk
-    api_key = os.getenv('ANTHROPIC_API_KEY')
-    client = Anthropic(api_key=api_key)
     all_facts = []
 
     EXTRACTION_PROMPT = """You are a Legal Record Indexer. Extract key facts, testimony, and evidence from this chunk of an appellate record.
@@ -2438,6 +3097,8 @@ RULES:
 7. HIGH RECALL: Extract everything potentially relevant to the legal issues.
 8. Output ONLY the JSON array. No preamble, no markdown. Start with [ end with ]."""
 
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    claude_client = Anthropic(api_key=api_key)
     for i, chunk in enumerate(chunks):
         if progress_callback:
             progress_callback('extraction', i + 1, total_chunks, f'Indexing pages {chunk["range"]}...')
@@ -2448,7 +3109,8 @@ RECORD CHUNK (Pages {chunk['range']}):
 {chunk['text']}"""
 
         try:
-            response = client.messages.create(
+            print(f"[INDEX] Record chunk {i+1}/{total_chunks}, pages {chunk['range']}", flush=True)
+            response = claude_client.messages.create(
                 model='claude-sonnet-4-20250514',
                 max_tokens=8000,
                 system=EXTRACTION_PROMPT,
@@ -2529,8 +3191,8 @@ def _extract_record_evidence(docs):
     record_combined = "\n\n".join(record_texts) if record_texts else ""
 
     record_source = appellant_appendix_text if appellant_appendix_text else record_combined
-    if len(record_source) > 400000:
-        record_source = record_source[:400000]
+    if len(record_source) > MAX_PRIMARY_CHARS:
+        record_source = record_source[:MAX_PRIMARY_CHARS]
 
     prompt = f"""You are a legal research assistant. Extract KEY TESTIMONY and EVIDENCE from this appellate record/appendix.
 
@@ -2543,7 +3205,7 @@ Focus on:
 RECORD/APPENDIX:
 {record_source}
 
-{f"RESPONDENT'S APPENDIX:{chr(10)}{respondent_appendix_text[:100000] if len(respondent_appendix_text) > 100000 else respondent_appendix_text}" if respondent_appendix_text else ""}
+{f"RESPONDENT'S APPENDIX:{chr(10)}{respondent_appendix_text[:MAX_SECONDARY_CHARS] if len(respondent_appendix_text) > MAX_SECONDARY_CHARS else respondent_appendix_text}" if respondent_appendix_text else ""}
 
 FORMAT YOUR RESPONSE AS:
 
@@ -2593,16 +3255,16 @@ def _extract_transcript_quotes(docs, summaries=None):
 
     source_text = appellant_appendix_text if appellant_appendix_text else record_combined
 
-    if len(source_text) > 400000:
+    if len(source_text) > MAX_PRIMARY_CHARS:
         transcript_pages = []
         pages = source_text.split('--- PAGE ')
         for page in pages:
             if any(marker in page for marker in ['THE COURT:', 'MR. ', 'MS. ', 'Q.', 'A.', 'BY MR.', 'BY MS.']):
                 transcript_pages.append('--- PAGE ' + page if not page.startswith('---') else page)
         if transcript_pages:
-            source_text = '\n\n'.join(transcript_pages[:100])
+            source_text = '\n\n'.join(transcript_pages[:400])
         else:
-            source_text = source_text[:400000]
+            source_text = source_text[:MAX_PRIMARY_CHARS]
 
     prompt = f"""You are a legal research assistant extracting KEY TRANSCRIPT QUOTES from appellate record/appendix.
 
@@ -2619,7 +3281,7 @@ Focus on extracting EXACT QUOTES of:
 RECORD/APPENDIX TO SEARCH:
 {source_text}
 
-{f"RESPONDENT'S APPENDIX:{chr(10)}{respondent_appendix_text[:100000] if len(respondent_appendix_text) > 100000 else respondent_appendix_text}" if respondent_appendix_text else ""}
+{f"RESPONDENT'S APPENDIX:{chr(10)}{respondent_appendix_text[:MAX_SECONDARY_CHARS] if len(respondent_appendix_text) > MAX_SECONDARY_CHARS else respondent_appendix_text}" if respondent_appendix_text else ""}
 
 FORMAT - USE EXACT QUOTES WITH PAGE NUMBERS:
 
@@ -2644,7 +3306,7 @@ def _draft_appellant_brief(project, docs, drafting_instructions='', model='sonne
 
     decision_text = _truncate(docs.get('lower_court_decision', {}).get('text', ''), MAX_PRIMARY_CHARS)
     transcript_text = _truncate(docs.get('trial_transcript', {}).get('text', ''), MAX_SECONDARY_CHARS)
-    research_text = _truncate(_gather_legal_research(docs), MAX_SECONDARY_CHARS)
+    research_text = _truncate(_gather_legal_research(docs, project.get('case_law_issues', {})), MAX_SECONDARY_CHARS)
     existing_draft = _truncate(docs.get('existing_draft', {}).get('text', ''), MAX_PRIMARY_CHARS)
 
     # Pass 1: Extract record facts
@@ -2672,7 +3334,7 @@ POTENTIAL ERROR: [Why this might be wrong]
 
 Be exhaustive. Extract every significant ruling and finding."""
 
-    court_reasoning = call_claude(pass2_prompt, max_tokens=8000, model=model)
+    court_reasoning = call_claude(pass2_prompt, max_tokens=8000)
 
     # Pass 3: Extract case law from research and transcript
     sources_for_cases = decision_text
@@ -2696,7 +3358,7 @@ CONTEXT: [How it's used in the document]
 
 Extract ALL cases. Do not summarize - use exact quotes."""
 
-    case_law = call_claude(pass3_prompt, max_tokens=8000, model=model)
+    case_law = call_claude(pass3_prompt, max_tokens=8000)
 
     # Build attorney instructions block if provided
     atty_instructions = ""
@@ -2797,6 +3459,8 @@ Respondent: {project.get('respondent', '')}
    - Blank line between paragraphs and before/after headings
    - Case names: _underscores_ only, NEVER **asterisks**
 
+{_build_anti_hallucination_block()}
+
 {_build_drafting_protocol()}
 
 {_build_writing_style()}
@@ -2810,14 +3474,14 @@ Respondent: {project.get('respondent', '')}
     # Convert any bold case names to underscore format
     final_brief = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', final_brief)
 
-    # Citation validation disabled - too many false positives
-    # final_brief = validate_citations(
-    #     final_brief,
-    #     decision_text,      # lower court decision
-    #     existing_draft,     # existing draft (for case validation)
-    #     research_text,      # legal research upload
-    #     case_law,           # Pass 3 extracted cases
-    # )
+    # Citation validation — checks case names AND reporter numbers against sources
+    final_brief = validate_citations(
+        final_brief,
+        decision_text,
+        existing_draft,
+        research_text,
+        case_law,
+    )
 
     return final_brief, {
         'court_reasoning': court_reasoning,
@@ -2832,10 +3496,15 @@ def _draft_respondent_brief(project, docs, drafting_instructions='', model='sonn
     if structure and structure.get('points'):
         return _draft_respondent_brief_structured(project, docs, structure, drafting_instructions, model)
 
-    appellant_text = _truncate(docs.get('appellant_brief', {}).get('text', ''), MAX_PRIMARY_CHARS)
+    appellant_text = _truncate(_strip_opposing_brief_chrome(docs.get('appellant_brief', {}).get('text', '')), MAX_PRIMARY_CHARS)
     decision_text = _truncate(docs.get('lower_court_decision', {}).get('text', ''), MAX_PRIMARY_CHARS)
-    research_text = _truncate(_gather_legal_research(docs), MAX_SECONDARY_CHARS)
+    research_text = _truncate(_gather_legal_research(docs, project.get('case_law_issues', {})), MAX_SECONDARY_CHARS)
     existing_draft = _truncate(docs.get('existing_draft', {}).get('text', ''), MAX_PRIMARY_CHARS)
+
+    # Gather co-respondent briefs (friendly party — source of arguments and cases)
+    co_respondent_briefs = _gather_respondent_briefs(docs, sanitize=False)
+    co_respondent_text = '\n\n'.join(text for _, text, _ in co_respondent_briefs)
+    co_respondent_text = _truncate(co_respondent_text, MAX_SECONDARY_CHARS) if co_respondent_text else ''
 
     # Pass 1: Extract cases from appellant's brief
     pass1_prompt = f"""You are a legal research assistant. Extract EVERY case citation from this appellant's opening brief.
@@ -2856,13 +3525,15 @@ BRIEF PAGE: [page number]
 
 Extract ALL cases. Do not summarize - use exact quotes."""
 
-    appellant_cases = call_claude(pass1_prompt, max_tokens=8000, model=model)
+    appellant_cases = call_claude(pass1_prompt, max_tokens=8000)
 
     # Pass 2: Extract record evidence supporting affirmance
     record_evidence = _extract_record_evidence(docs)
 
     # Pass 3: Extract respondent's case law
     sources_for_cases = decision_text
+    if co_respondent_text:
+        sources_for_cases += f"\n\nCO-RESPONDENT'S BRIEF (FRIENDLY PARTY — USE THEIR ARGUMENTS AND CASES):\n{co_respondent_text}"
     if research_text:
         sources_for_cases += f"\n\nLEGAL RESEARCH:\n{research_text}"
 
@@ -2883,7 +3554,7 @@ SUPPORTS AFFIRMANCE BECAUSE: [explanation]
 
 Extract ALL cases."""
 
-    respondent_cases = call_claude(pass3_prompt, max_tokens=8000, model=model)
+    respondent_cases = call_claude(pass3_prompt, max_tokens=8000)
 
     # Build attorney instructions block if provided
     atty_instructions = ""
@@ -2896,6 +3567,18 @@ These instructions take priority over general drafting guidance. Follow them clo
 {drafting_instructions}
 === END ATTORNEY'S INSTRUCTIONS ===
 """
+
+    # Build co-respondent block if available
+    co_respondent_block = ''
+    if co_respondent_text:
+        co_respondent_block = f"""=== CO-RESPONDENT'S BRIEF (FRIENDLY PARTY — USE THEIR ARGUMENTS AND CASES) ===
+This brief was filed by a co-respondent on the SAME SIDE as you. Their arguments SUPPORT your position.
+- Draw on their legal arguments, case citations, and factual analysis
+- Do NOT duplicate their brief — complement it with additional arguments or different emphasis
+- You may cite the same cases but develop different points
+- Reference their arguments where useful: "As the [co-respondent] correctly notes..."
+{co_respondent_text}
+=== END CO-RESPONDENT'S BRIEF ==="""
 
     # Pass 4: Draft the full brief (or complete existing draft)
     existing_draft_section = ""
@@ -2945,6 +3628,8 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
 
 === LOWER COURT DECISION (EVIDENTIARY SOURCE — THIS IS FACTUAL) ===
 {_truncate(decision_text, MAX_SECONDARY_CHARS)}
+
+{co_respondent_block}
 
 === DRAFTING REQUIREMENTS ===
 
@@ -2997,6 +3682,8 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
    - Blank line between paragraphs and before/after headings
    - Case names: _underscores_ only, NEVER **asterisks**
 
+{_build_anti_hallucination_block()}
+
 {_build_drafting_protocol()}
 
 {_build_writing_style()}
@@ -3010,16 +3697,16 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
     # Convert any bold case names to underscore format
     final_brief = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', final_brief)
 
-    # Citation validation disabled - too many false positives
-    # final_brief = validate_citations(
-    #     final_brief,
-    #     appellant_text,     # appellant's opening brief
-    #     existing_draft,     # existing draft (for case validation)
-    #     decision_text,      # lower court decision
-    #     research_text,      # legal research upload
-    #     appellant_cases,    # Pass 1 extracted cases
-    #     respondent_cases,   # Pass 3 extracted cases
-    # )
+    # Citation validation — checks case names AND reporter numbers against sources
+    final_brief = validate_citations(
+        final_brief,
+        appellant_text,
+        existing_draft,
+        decision_text,
+        research_text,
+        appellant_cases,
+        respondent_cases,
+    )
 
     return final_brief, {
         'appellant_cases': appellant_cases,
@@ -3071,7 +3758,7 @@ BRIEF PAGE: [page number]
 
 Extract ALL cases. Do not summarize - use exact quotes."""
 
-    respondent_cases = call_claude(pass1_prompt, max_tokens=8000, model=model)
+    respondent_cases = call_claude(pass1_prompt, max_tokens=8000)
 
     # Pass 2: Extract cases from appellant's brief
     pass2_prompt = f"""You are a legal research assistant. Extract EVERY case citation from this appellant's opening brief.
@@ -3093,7 +3780,7 @@ BRIEF PAGE: [page number]
 
 Extract ALL cases. Do not summarize - use exact quotes."""
 
-    appellant_cases = call_claude(pass2_prompt, max_tokens=8000, model=model)
+    appellant_cases = call_claude(pass2_prompt, max_tokens=8000)
 
     # Pass 3: Extract record evidence
     record_evidence = _extract_record_evidence(docs)
@@ -3118,6 +3805,9 @@ These instructions take priority over general drafting guidance. Follow them clo
     record_index = project.get('record_index', [])
     record_index_block = _format_record_index_for_prompt(record_index) if record_index else ''
 
+    # Build witness constraint if witness map exists
+    witness_constraint = _build_witness_constraint_for_project(project)
+
     # Pass 5: Draft the brief (or complete existing draft)
     existing_draft_section = ""
     drafting_task = "Draft an EXHAUSTIVE reply brief FOR APPELLANTS arguing for REVERSAL. Do not summarize - argue thoroughly with full citations. Every claim must be supported. Every respondent argument must be addressed and REFUTED. The conclusion must request REVERSAL of the lower court's order."
@@ -3141,6 +3831,8 @@ EXISTING DRAFT:
     pass5_prompt = f"""You are an expert appellate attorney {"completing" if existing_draft else "drafting"} a REPLY BRIEF FOR APPELLANTS.
 
 {opening_brief_constraints}
+
+{witness_constraint}
 
 STEP 1 — READ THE OPENING BRIEF FIRST:
 Before writing ANYTHING, you MUST carefully read the APPELLANT'S OPENING BRIEF provided below.
@@ -3278,14 +3970,38 @@ CRITICAL - CITATION FORMAT REMINDERS:
     final_brief = call_claude(pass5_prompt, max_tokens=16000, model=model)
 
     # Run guardrail: strip markdown, fix citations, enforce terminology
-    research_text = _truncate(_gather_legal_research(docs), MAX_SECONDARY_CHARS)
-    final_brief = guardrail_brief(final_brief, 'reply', research_text, opening_brief_text=full_opening_text)
+    research_text = _truncate(_gather_legal_research(docs, project.get('case_law_issues', {})), MAX_SECONDARY_CHARS)
+    all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
+    final_brief = guardrail_brief(final_brief, 'reply', research_text, opening_brief_text=full_opening_text, all_source_text=all_source_text)
+
+    # Run QC report
+    qc = BriefQC()
+    qc_results = qc.run_qc(final_brief)
+    qc_report = generate_qc_report(qc_results)
+    print(f"[QC] {qc_report}", flush=True)
+
+    # Run citation validation against record page ranges
+    record_ranges = get_record_page_ranges(docs)
+    if record_ranges:
+        cites = extract_all_citations(final_brief)
+        validation = validate_page_ranges(cites, record_ranges)
+        final_brief = flag_violations(final_brief, validation)
+        cite_report = generate_validation_report(validation)
+        print(f"[CITE VALIDATION] {cite_report}", flush=True)
+    else:
+        cite_report = ''
+
+    # Verify witness attribution framing
+    if project.get('witness_map'):
+        final_brief = verify_attribution_framing(final_brief, {'entries': project['witness_map']})
 
     return final_brief, {
         'respondent_cases': respondent_cases,
         'appellant_cases': appellant_cases,
         'record_evidence': record_evidence,
         'transcript_quotes': transcript_quotes,
+        'qc_report': qc_report,
+        'citation_report': cite_report,
     }
 
 
@@ -3352,7 +4068,7 @@ def revise_brief(project_id):
 
     # Gather source documents for context, with truncation
     record_combined = _gather_record_volumes(docs)
-    research_text = _gather_legal_research(docs)
+    research_text = _gather_legal_research(docs, project.get('case_law_issues', {}))
 
     if brief_type == 'appellant':
         doc_items = [
@@ -3364,7 +4080,7 @@ def revise_brief(project_id):
         ]
     elif brief_type == 'respondent':
         doc_items = [
-            ('APPELLANT\'S OPENING BRIEF', docs.get('appellant_brief', {}).get('text', ''), 'primary'),
+            ('APPELLANT\'S OPENING BRIEF (OPPOSING PARTY — REBUT THIS)', _strip_opposing_brief_chrome(docs.get('appellant_brief', {}).get('text', '')), 'primary'),
             ('LOWER COURT DECISION', docs.get('lower_court_decision', {}).get('text', ''), 'primary'),
             ('RESPONDENT\'S APPENDIX', docs.get('respondent_appendix', {}).get('text', ''), 'secondary'),
             ('RECORD ON APPEAL', record_combined, 'primary'),
@@ -3390,7 +4106,20 @@ def revise_brief(project_id):
         if full_opening:
             revise_constraints = _preprocess_opening_brief(full_opening)
 
+    # Build party context so the AI knows which side it's writing for
+    appellant_name = project.get('appellant', 'Appellant')
+    respondent_name = project.get('respondent', 'Respondent')
+    if brief_type == 'appellant':
+        party_context = f"You are writing FOR {appellant_name} (the appellant) AGAINST {respondent_name} (the respondent). Every argument must advocate for the appellant's position."
+    elif brief_type == 'respondent':
+        party_context = f"You are writing FOR {respondent_name} (the respondent) AGAINST {appellant_name} (the appellant). Every argument must advocate for the respondent's position and defend the lower court/agency decision."
+    else:  # reply
+        party_context = f"You are writing FOR {appellant_name} (the appellant) AGAINST {respondent_name} (the respondent). This is a reply brief responding to the respondent's arguments."
+
     prompt = f"""You are an expert appellate attorney revising a brief.
+
+PARTY CONTEXT — CRITICAL:
+{party_context}
 
 {revise_constraints}
 
@@ -3486,20 +4215,99 @@ FORMATTING - CRITICAL (PLAIN TEXT, NO MARKDOWN):
 - Case names: _underscores_ only, NEVER **asterisks**
 - Preserve the existing formatting style of the brief you are revising
 
+{_build_anti_hallucination_block()}
+
 {_build_writing_style()}
 
 OUTPUT ONLY THE COMPLETE REVISED BRIEF TEXT. No commentary. PLAIN TEXT ONLY — NO MARKDOWN:"""
 
+    # --- Pre-revision metrics (baseline for validation) ---
+    def _count_metrics(text):
+        words = len(text.split())
+        record_cites = len(re.findall(r'\(\d+\)', text))
+        case_cites = len(re.findall(r'(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d|NE[23]d)', text))
+        quotes = len(re.findall(r'"[^"]{20,}"', text))
+        points = re.findall(r'POINT\s+[IVXLCDM\d]+', text)
+        return {
+            'words': words,
+            'record_cites': record_cites,
+            'case_cites': case_cites,
+            'quotes': quotes,
+            'points': points
+        }
+
+    pre_metrics = _count_metrics(existing_brief)
+    print(f"[REVISION] Pre-metrics: {pre_metrics['words']} words, {pre_metrics['record_cites']} record cites, "
+          f"{pre_metrics['case_cites']} case cites, {pre_metrics['quotes']} quotes, "
+          f"Points: {pre_metrics['points']}", flush=True)
+
+    # Scale max_tokens to brief length — 1 token ≈ 4 chars, add 20% headroom
+    estimated_tokens = max(16000, int(len(existing_brief) / 3.5))
     model = data.get('model', 'sonnet')
-    revised_text = call_claude(prompt, max_tokens=16000, model=model)
+    revised_text = call_claude(prompt, max_tokens=estimated_tokens, model=model)
 
     # Convert any bold case names to underscore format
     revised_text = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', revised_text)
 
-    # Citation validation disabled - too many false positives
-    # source_texts = [text for label, text in fitted if text]
-    # revised_text = validate_citations(revised_text, *source_texts)
+    # Citation validation — flag fabricated case names and reporter numbers
+    source_texts_for_validation = [text for label, text in fitted if text]
+    source_texts_for_validation.append(existing_brief)  # also check against the brief being revised
+    revised_text = validate_citations(revised_text, *source_texts_for_validation)
 
+    # --- Post-revision validation: REJECT if content gutted ---
+    post_metrics = _count_metrics(revised_text)
+    print(f"[REVISION] Post-metrics: {post_metrics['words']} words, {post_metrics['record_cites']} record cites, "
+          f"{post_metrics['case_cites']} case cites, {post_metrics['quotes']} quotes, "
+          f"Points: {post_metrics['points']}", flush=True)
+
+    violations = []
+
+    # Word count floor: revision must be at least 70% of original
+    if pre_metrics['words'] > 0:
+        word_ratio = post_metrics['words'] / pre_metrics['words']
+        if word_ratio < 0.70:
+            violations.append(f"Word count dropped {(1-word_ratio)*100:.0f}% ({pre_metrics['words']} → {post_metrics['words']})")
+
+    # Record citations floor: must retain at least 75%
+    if pre_metrics['record_cites'] > 5:
+        cite_ratio = post_metrics['record_cites'] / pre_metrics['record_cites']
+        if cite_ratio < 0.75:
+            violations.append(f"Record citations dropped {(1-cite_ratio)*100:.0f}% ({pre_metrics['record_cites']} → {post_metrics['record_cites']})")
+
+    # Case citations floor: must retain at least 60%
+    if pre_metrics['case_cites'] > 3:
+        case_ratio = post_metrics['case_cites'] / pre_metrics['case_cites']
+        if case_ratio < 0.60:
+            violations.append(f"Case citations dropped {(1-case_ratio)*100:.0f}% ({pre_metrics['case_cites']} → {post_metrics['case_cites']})")
+
+    # Quote preservation: must retain at least 60%
+    if pre_metrics['quotes'] > 5:
+        quote_ratio = post_metrics['quotes'] / pre_metrics['quotes']
+        if quote_ratio < 0.60:
+            violations.append(f"Quoted testimony dropped {(1-quote_ratio)*100:.0f}% ({pre_metrics['quotes']} → {post_metrics['quotes']})")
+
+    # Point headings: must retain all points
+    if len(pre_metrics['points']) > len(post_metrics['points']):
+        violations.append(f"Point headings lost ({pre_metrics['points']} → {post_metrics['points']})")
+
+    # Refusal detection: reject if AI wrote meta-commentary instead of revising
+    refusal_phrases = ['i cannot', 'i apologize', 'i\'m unable', 'please clarify', 'i must maintain']
+    lower_revised = revised_text[:500].lower()
+    for phrase in refusal_phrases:
+        if phrase in lower_revised:
+            violations.append(f"AI refused to revise (detected: '{phrase}')")
+            break
+
+    if violations:
+        print(f"[REVISION] REJECTED — {len(violations)} violations: {violations}", flush=True)
+        return jsonify({
+            'error': 'Revision rejected — content loss detected. Your original brief is preserved.',
+            'violations': violations,
+            'pre_metrics': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
+            'post_metrics': {k: v if not isinstance(v, list) else len(v) for k, v in post_metrics.items()},
+        }), 422
+
+    # --- Validation passed — save revision ---
     # Initialize revision tracking if not present
     if 'revision_count' not in project:
         project['revision_count'] = 0
@@ -3521,7 +4329,11 @@ OUTPUT ONLY THE COMPLETE REVISED BRIEF TEXT. No commentary. PLAIN TEXT ONLY — 
 
     return jsonify({
         'revised_brief': revised_text,
-        'revision_count': project['revision_count']
+        'revision_count': project['revision_count'],
+        'metrics': {
+            'pre': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
+            'post': {k: v if not isinstance(v, list) else len(v) for k, v in post_metrics.items()},
+        }
     })
 
 
@@ -3628,7 +4440,7 @@ def generate_brief(project_id):
             return False
         # Known heading patterns
         heading_patterns = [
-            r'^POINT\s+[IVXLCDM]+',
+            r'^POINT\s+[IVXLCDM\d]+:?',
             r'^PRELIMINARY STATEMENT',
             r'^STATEMENT OF THE CASE',
             r'^STATEMENT OF FACTS',
@@ -3699,20 +4511,27 @@ def generate_brief(project_id):
             run.bold = True
 
     def _add_text_with_citations(p, text, nyscef_cfg, is_bold=False):
-        """Split text on record citations, inserting hyperlinks where NYSCEF URLs resolve."""
-        citation_pat = re.compile(r'(\(\d+(?:\s*-\s*\d+)?\))')
+        """Split text on record citations, inserting hyperlinks where NYSCEF URLs resolve.
+        Handles comma-separated refs like (547-548, 556) and (730-731, 734) and single-digit (4)."""
+        # Match bare page-number citations: (4), (5-6), (47, 55), (547-548, 556)
+        # Exclude: court citations (2d Dept 2020), years standing alone (2023-2026)
+        citation_pat = re.compile(r'(?<![a-zA-Z0-9§¶)\-])(\(\d+(?:\s*-\s*\d+)?(?:,\s*\d+(?:\s*-\s*\d+)?)*\))(?![a-zA-Z])')
         segments = citation_pat.split(text)
         for segment in segments:
-            m = re.match(r'\((\d+)(?:\s*-\s*\d+)?\)', segment)
-            if m:
-                page = int(m.group(1))
-                url = resolve_nyscef_url(page, nyscef_cfg)
-                if url:
-                    _add_run(p, '(', is_bold)
-                    _add_hyperlink(p, url, segment[1:-1])
-                    _add_run(p, ')', is_bold)
-                else:
-                    _add_run(p, segment, is_bold)
+            if segment.startswith('(') and segment.endswith(')') and re.match(r'\(\d', segment):
+                inner = segment[1:-1]
+                parts = [p.strip() for p in inner.split(',')]
+                _add_run(p, '(', is_bold)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        _add_run(p, ', ', is_bold)
+                    page = int(re.match(r'(\d+)', part).group(1))
+                    url = resolve_nyscef_url(page, nyscef_cfg)
+                    if url:
+                        _add_hyperlink(p, url, part)
+                    else:
+                        _add_run(p, part, is_bold)
+                _add_run(p, ')', is_bold)
             elif segment:
                 _add_run(p, segment, is_bold)
 
@@ -3727,6 +4546,9 @@ def generate_brief(project_id):
         p.paragraph_format.space_before = Pt(0)
         if alignment:
             p.alignment = alignment
+        elif not is_bold:
+            # Body paragraphs get 0.5" first-line indent
+            p.paragraph_format.first_line_indent = Inches(0.5)
 
         use_links = link_citations and nyscef_cfg
 
@@ -4069,6 +4891,605 @@ def index_record_status(project_id, job_id):
     return jsonify(job)
 
 
+# ============ WITNESS MAP (ported from MotionDrafter) ============
+
+@app.route('/project/<project_id>/witness-map', methods=['GET', 'POST'])
+def witness_map_route(project_id):
+    """Get or update the witness map for a project."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    if request.method == 'GET':
+        return jsonify({'witness_map': project.get('witness_map', [])})
+
+    # POST — save witness map
+    data = request.json or {}
+    project['witness_map'] = data.get('witness_map', [])
+    save_project(project_id, project)
+    return jsonify({'success': True})
+
+
+@app.route('/project/<project_id>/extract-witnesses', methods=['POST'])
+def extract_witnesses_route(project_id):
+    """Extract witness map from uploaded trial transcript PDFs."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    docs = project.get('documents', {})
+    witness_entries = []
+
+    # Extract from trial transcript PDFs
+    for key, doc in docs.items():
+        if not isinstance(doc, dict):
+            continue
+        file_path = doc.get('file_path', '')
+        if file_path and file_path.lower().endswith('.pdf') and ('transcript' in key.lower() or 'trial' in key.lower()):
+            try:
+                wmap = extract_witness_map_from_pdf(file_path)
+                witness_entries.extend(wmap.get('entries', []))
+                print(f"[WITNESS MAP] Extracted {len(wmap.get('entries', []))} entries from {key}", flush=True)
+            except Exception as e:
+                print(f"[WITNESS MAP] Error extracting from {key}: {e}", flush=True)
+
+    # Also try roster extraction from document text
+    roster = extract_roster_from_digests(docs)
+    if roster:
+        # Enrich existing entries with party/role from roster
+        for entry in witness_entries:
+            witness_last = entry['witness'].split()[-1]
+            for name, info in roster.items():
+                if witness_last.lower() in name.lower() or name.lower() in witness_last.lower():
+                    if info.get('party') and not entry.get('party'):
+                        entry['party'] = info['party'].capitalize()
+                    if info.get('role') and not entry.get('role'):
+                        entry['role'] = info['role']
+                    break
+
+    project['witness_map'] = witness_entries
+    save_project(project_id, project)
+
+    return jsonify({
+        'success': True,
+        'entries': witness_entries,
+        'count': len(witness_entries),
+    })
+
+
+def _build_witness_constraint_for_project(project):
+    """Build witness constraint block from project's witness_map."""
+    entries = project.get('witness_map', [])
+    if not entries:
+        return ''
+    return build_witness_constraint({'entries': entries})
+
+
+# ============ NYSCEF HYPERLINKER (standalone tool) ============
+
+# Temp storage for hyperlinker uploads: session_id -> {path, filename, processed_path}
+_hyperlinker_sessions = {}
+
+# Match bare page-number citations: (4), (5-6), (47, 55), (547-548, 556)
+# \d+ allows single-digit pages. Lookbehind blocks attachment to words/digits.
+# Lookahead blocks court citations like (2d Dept 2020) by rejecting trailing letters.
+CITATION_PAT = re.compile(
+    r'(?<![a-zA-Z0-9§¶)\-])'
+    r'(\(\d+(?:\s*-\s*\d+)?(?:,\s*\d+(?:\s*-\s*\d+)?)*\))'
+    r'(?![a-zA-Z])'
+)
+
+
+def _parse_pdf_page_labels(pdf_path):
+    """Parse /PageLabels from a local PDF into a
+    {label_string: physical_page_number (1-based)} mapping.
+    Returns None if the PDF has no page labels."""
+    import PyPDF2
+    from PyPDF2.generic import IndirectObject
+
+    reader = PyPDF2.PdfReader(pdf_path)
+
+    # Access the document catalog for /PageLabels
+    try:
+        root = reader.trailer['/Root']
+        if '/PageLabels' not in root:
+            return None
+        page_labels_obj = root['/PageLabels']
+        if isinstance(page_labels_obj, IndirectObject):
+            page_labels_obj = page_labels_obj.get_object()
+    except (KeyError, TypeError):
+        return None
+
+    # Collect the /Nums array (may be nested under /Kids)
+    nums = []
+    if '/Nums' in page_labels_obj:
+        raw = page_labels_obj['/Nums']
+        for item in raw:
+            nums.append(item.get_object() if isinstance(item, IndirectObject) else item)
+    elif '/Kids' in page_labels_obj:
+        def _flatten(node):
+            if isinstance(node, IndirectObject):
+                node = node.get_object()
+            if '/Nums' in node:
+                for item in node['/Nums']:
+                    nums.append(item.get_object() if isinstance(item, IndirectObject) else item)
+            if '/Kids' in node:
+                for kid in node['/Kids']:
+                    _flatten(kid)
+        _flatten(page_labels_obj)
+
+    if not nums:
+        return None
+
+    # Parse paired entries: [page_index, label_dict, page_index, label_dict, ...]
+    ranges = []
+    i = 0
+    while i < len(nums) - 1:
+        page_idx = int(nums[i])
+        label_dict = nums[i + 1]
+        if isinstance(label_dict, IndirectObject):
+            label_dict = label_dict.get_object()
+        style = str(label_dict.get('/S', '')) if '/S' in label_dict else None
+        start = int(label_dict.get('/St', 1)) if '/St' in label_dict else 1
+        prefix = str(label_dict.get('/P', '')) if '/P' in label_dict else ''
+        ranges.append((page_idx, style, start, prefix))
+        i += 2
+
+    ranges.sort(key=lambda x: x[0])
+    total_pages = len(reader.pages)
+
+    def _to_roman(n):
+        vals = [1000,900,500,400,100,90,50,40,10,9,5,4,1]
+        syms = ['M','CM','D','CD','C','XC','L','XL','X','IX','V','IV','I']
+        r = ''
+        for vi, v in enumerate(vals):
+            while n >= v:
+                r += syms[vi]
+                n -= v
+        return r
+
+    label_map = {}  # label_string -> physical page (1-based)
+    for ri, (page_idx, style, start, prefix) in enumerate(ranges):
+        end_idx = ranges[ri + 1][0] if ri + 1 < len(ranges) else total_pages
+        for pi in range(page_idx, end_idx):
+            num = start + (pi - page_idx)
+            if style == '/D':
+                label = prefix + str(num)
+            elif style == '/r':
+                label = prefix + _to_roman(num).lower()
+            elif style == '/R':
+                label = prefix + _to_roman(num)
+            elif style is None:
+                label = prefix
+            else:
+                label = prefix + str(num)
+            label_map[label] = pi + 1  # 1-based
+
+    return label_map
+
+
+def _resolve_nyscef_url_via_labels(page_num, label_maps):
+    """Given a record page number, look it up across all volume label maps.
+    label_maps is a list of {doc_index, label_map} dicts.
+    Returns a NYSCEF URL with #page= pointing to the correct physical page, or None."""
+    page_str = str(page_num)
+    for vol in label_maps:
+        label_map = vol.get('label_map')
+        if not label_map:
+            continue
+        physical = label_map.get(page_str)
+        if physical is not None:
+            doc_index = vol['doc_index']
+            return f"https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex={doc_index}#page={physical}"
+    return None
+
+
+def add_hyperlinks_to_docx(docx_path, label_maps):
+    """Open an existing .docx and add NYSCEF hyperlinks to record citations.
+    label_maps: list of {doc_index, label_map} dicts from _fetch_nyscef_page_labels.
+    Returns (output_path, link_count)."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    from copy import deepcopy
+
+    doc = DocxDocument(docx_path)
+    link_count = 0
+
+    for paragraph in doc.paragraphs:
+        full_text = paragraph.text
+        if not CITATION_PAT.search(full_text):
+            continue
+
+        runs = paragraph.runs
+        if not runs:
+            continue
+
+        run_boundaries = []
+        pos = 0
+        for run in runs:
+            run_text = run.text or ''
+            run_boundaries.append((pos, pos + len(run_text), run))
+            pos += len(run_text)
+
+        matches = list(CITATION_PAT.finditer(full_text))
+        if not matches:
+            continue
+
+        # Check if any citation resolves
+        has_resolvable = False
+        for m in matches:
+            inner = m.group(1)[1:-1]
+            parts = [p.strip() for p in inner.split(',')]
+            for part in parts:
+                page = int(re.match(r'(\d+)', part).group(1))
+                if _resolve_nyscef_url_via_labels(page, label_maps):
+                    has_resolvable = True
+                    break
+            if has_resolvable:
+                break
+        if not has_resolvable:
+            continue
+
+        p_elem = paragraph._p
+
+        # Per-character formatting map from original runs
+        char_formats = []
+        for start, end, run in run_boundaries:
+            rPr = run._r.find(qn('w:rPr'))
+            rPr_copy = deepcopy(rPr) if rPr is not None else None
+            for _ in range(end - start):
+                char_formats.append(rPr_copy)
+
+        # Remove existing runs and hyperlinks
+        for child in list(p_elem):
+            if child.tag == qn('w:r') or child.tag == qn('w:hyperlink'):
+                p_elem.remove(child)
+
+        cursor = 0
+        part = paragraph.part
+
+        def _make_run_elem(text, rPr_source):
+            r = OxmlElement('w:r')
+            if rPr_source is not None:
+                r.append(deepcopy(rPr_source))
+            t = OxmlElement('w:t')
+            t.set(qn('xml:space'), 'preserve')
+            t.text = text
+            r.append(t)
+            return r
+
+        def _make_hyperlink_run(text, url, rPr_source):
+            r_id = part.relate_to(
+                url,
+                'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+                is_external=True
+            )
+            hyperlink = OxmlElement('w:hyperlink')
+            hyperlink.set(qn('r:id'), r_id)
+            r = OxmlElement('w:r')
+            if rPr_source is not None:
+                rPr = deepcopy(rPr_source)
+            else:
+                rPr = OxmlElement('w:rPr')
+            existing_color = rPr.find(qn('w:color'))
+            if existing_color is not None:
+                rPr.remove(existing_color)
+            color = OxmlElement('w:color')
+            color.set(qn('w:val'), '0000FF')
+            rPr.append(color)
+            existing_u = rPr.find(qn('w:u'))
+            if existing_u is not None:
+                rPr.remove(existing_u)
+            u = OxmlElement('w:u')
+            u.set(qn('w:val'), 'single')
+            rPr.append(u)
+            rStyle = OxmlElement('w:rStyle')
+            rStyle.set(qn('w:val'), 'Hyperlink')
+            rPr.insert(0, rStyle)
+            r.append(rPr)
+            t = OxmlElement('w:t')
+            t.set(qn('xml:space'), 'preserve')
+            t.text = text
+            r.append(t)
+            hyperlink.append(r)
+            return hyperlink
+
+        def _get_rPr_at(char_pos):
+            if char_pos < len(char_formats):
+                return char_formats[char_pos]
+            elif char_formats:
+                return char_formats[-1]
+            return None
+
+        for m in matches:
+            if m.start() > cursor:
+                plain = full_text[cursor:m.start()]
+                rPr = _get_rPr_at(cursor)
+                p_elem.append(_make_run_elem(plain, rPr))
+
+            citation_text = m.group(1)
+            inner = citation_text[1:-1]
+            parts = [pt.strip() for pt in inner.split(',')]
+            rPr_cite = _get_rPr_at(m.start())
+
+            p_elem.append(_make_run_elem('(', rPr_cite))
+
+            for i, part_text in enumerate(parts):
+                if i > 0:
+                    p_elem.append(_make_run_elem(', ', rPr_cite))
+                page = int(re.match(r'(\d+)', part_text).group(1))
+                url = _resolve_nyscef_url_via_labels(page, label_maps)
+                if url:
+                    p_elem.append(_make_hyperlink_run(part_text, url, rPr_cite))
+                    link_count += 1
+                else:
+                    p_elem.append(_make_run_elem(part_text, rPr_cite))
+
+            p_elem.append(_make_run_elem(')', rPr_cite))
+            cursor = m.end()
+
+        if cursor < len(full_text):
+            rPr = _get_rPr_at(cursor)
+            p_elem.append(_make_run_elem(full_text[cursor:], rPr))
+
+    base, ext = os.path.splitext(docx_path)
+    output_path = base + '_hyperlinked' + ext
+    doc.save(output_path)
+    return output_path, link_count
+
+
+@app.route('/hyperlinker')
+def hyperlinker_page():
+    """Render the NYSCEF hyperlinker tool page."""
+    return render_template('hyperlinker.html')
+
+
+@app.route('/hyperlinker/upload', methods=['POST'])
+def hyperlinker_upload():
+    """Accept a .docx upload and store it in a temp directory."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    if not f.filename or not f.filename.lower().endswith('.docx'):
+        return jsonify({'error': 'Please upload a .docx file'}), 400
+
+    session_id = str(uuid.uuid4())[:8]
+    tmp_dir = tempfile.mkdtemp(prefix='hyperlinker_')
+    filename = secure_filename(f.filename)
+    filepath = os.path.join(tmp_dir, filename)
+    f.save(filepath)
+
+    _hyperlinker_sessions[session_id] = {
+        'path': filepath,
+        'filename': filename,
+        'tmp_dir': tmp_dir,
+        'processed_path': None,
+        'volumes': [],  # list of {pdf_path, nyscef_url, doc_index, filename}
+    }
+    return jsonify({'session_id': session_id, 'filename': filename})
+
+
+@app.route('/hyperlinker/upload-volume', methods=['POST'])
+def hyperlinker_upload_volume():
+    """Accept a record volume PDF upload for page label parsing."""
+    session_id = request.form.get('session_id')
+    if not session_id or session_id not in _hyperlinker_sessions:
+        return jsonify({'error': 'Invalid session'}), 400
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    if not f.filename or not f.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Please upload a PDF file'}), 400
+
+    nyscef_url = request.form.get('nyscef_url', '').strip()
+    if not nyscef_url:
+        return jsonify({'error': 'NYSCEF URL is required'}), 400
+
+    doc_index = nyscef_url
+    if 'docIndex=' in doc_index:
+        doc_index = doc_index.split('docIndex=')[1].split('#')[0].split('&')[0]
+
+    session = _hyperlinker_sessions[session_id]
+    filename = secure_filename(f.filename)
+    pdf_path = os.path.join(session['tmp_dir'], filename)
+    f.save(pdf_path)
+
+    # Parse page labels immediately to validate
+    label_map = _parse_pdf_page_labels(pdf_path)
+    if label_map is None:
+        os.unlink(pdf_path)
+        return jsonify({'error': f'{f.filename} has no page labels.'}), 400
+
+    vol_index = len(session['volumes'])
+    session['volumes'].append({
+        'pdf_path': pdf_path,
+        'nyscef_url': nyscef_url,
+        'doc_index': doc_index,
+        'filename': f.filename,
+        'label_count': len(label_map),
+    })
+
+    return jsonify({
+        'success': True,
+        'vol_index': vol_index,
+        'filename': f.filename,
+        'label_count': len(label_map),
+    })
+
+
+@app.route('/hyperlinker/remove-volume', methods=['POST'])
+def hyperlinker_remove_volume():
+    """Remove a previously uploaded volume."""
+    data = request.json or {}
+    session_id = data.get('session_id')
+    vol_index = data.get('vol_index')
+    if not session_id or session_id not in _hyperlinker_sessions:
+        return jsonify({'error': 'Invalid session'}), 400
+
+    session = _hyperlinker_sessions[session_id]
+    if vol_index is not None and 0 <= vol_index < len(session['volumes']):
+        vol = session['volumes'].pop(vol_index)
+        if os.path.exists(vol['pdf_path']):
+            os.unlink(vol['pdf_path'])
+
+    return jsonify({'success': True, 'volume_count': len(session['volumes'])})
+
+
+@app.route('/hyperlinker/process', methods=['POST'])
+def hyperlinker_process():
+    """Process the uploaded docx using page labels from uploaded volume PDFs."""
+    data = request.json or {}
+    session_id = data.get('session_id')
+    if not session_id or session_id not in _hyperlinker_sessions:
+        return jsonify({'error': 'Invalid session. Please re-upload your file.'}), 400
+
+    session = _hyperlinker_sessions[session_id]
+
+    if not session['volumes']:
+        return jsonify({'error': 'Please upload at least one record volume PDF.'}), 400
+
+    # Parse page labels from each uploaded volume
+    label_maps = []
+    for vi, vol in enumerate(session['volumes']):
+        try:
+            label_map = _parse_pdf_page_labels(vol['pdf_path'])
+        except Exception as e:
+            return jsonify({'error': f'Failed to parse {vol["filename"]}: {str(e)}'}), 500
+
+        if label_map is None:
+            return jsonify({'error': f'{vol["filename"]} has no page labels.'}), 400
+
+        label_maps.append({'doc_index': vol['doc_index'], 'label_map': label_map})
+
+    try:
+        output_path, link_count = add_hyperlinks_to_docx(session['path'], label_maps)
+        session['processed_path'] = output_path
+        return jsonify({'success': True, 'link_count': link_count, 'volumes_parsed': len(label_maps)})
+    except Exception as e:
+        return jsonify({'error': f'Processing failed: {str(e)}'}), 500
+
+
+@app.route('/hyperlinker/download')
+def hyperlinker_download():
+    """Download the processed .docx."""
+    session_id = request.args.get('session_id')
+    if not session_id or session_id not in _hyperlinker_sessions:
+        return jsonify({'error': 'Invalid session'}), 400
+
+    session = _hyperlinker_sessions[session_id]
+    if not session.get('processed_path') or not os.path.exists(session['processed_path']):
+        return jsonify({'error': 'No processed file available. Please process first.'}), 400
+
+    base, ext = os.path.splitext(session['filename'])
+    download_name = f"{base}_hyperlinked{ext}"
+
+    return send_file(
+        session['processed_path'],
+        as_attachment=True,
+        download_name=download_name,
+        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    )
+
+
+# ============ DROPBOX INTEGRATION ============
+
+@app.route('/dropbox/auth')
+def dropbox_auth():
+    """Start Dropbox OAuth flow."""
+    if not DROPBOX_APP_KEY or not DROPBOX_APP_SECRET:
+        return "Dropbox App Key and Secret not configured. Add them to config.json first.", 400
+
+    auth_flow = dropbox.DropboxOAuth2Flow(
+        consumer_key=DROPBOX_APP_KEY,
+        consumer_secret=DROPBOX_APP_SECRET,
+        redirect_uri="http://127.0.0.1:5003/dropbox/callback",
+        session=session,
+        csrf_token_session_key="dropbox-auth-csrf-token",
+        token_access_type='offline'
+    )
+    authorize_url = auth_flow.start()
+    return redirect(authorize_url)
+
+
+@app.route('/dropbox/callback')
+def dropbox_callback():
+    """Handle Dropbox OAuth callback."""
+    global config
+    try:
+        auth_flow = dropbox.DropboxOAuth2Flow(
+            consumer_key=DROPBOX_APP_KEY,
+            consumer_secret=DROPBOX_APP_SECRET,
+            redirect_uri="http://127.0.0.1:5003/dropbox/callback",
+            session=session,
+            csrf_token_session_key="dropbox-auth-csrf-token",
+            token_access_type='offline'
+        )
+        oauth_result = auth_flow.finish(request.args)
+
+        # Save tokens
+        config['dropbox_access_token'] = oauth_result.access_token
+        if oauth_result.refresh_token:
+            config['dropbox_refresh_token'] = oauth_result.refresh_token
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        return redirect('/?dropbox=connected')
+    except Exception as e:
+        return f"Error connecting to Dropbox: {str(e)}", 400
+
+
+def get_dropbox_client():
+    """Get an authenticated Dropbox client with automatic token refresh."""
+    access_token = config.get('dropbox_access_token')
+    refresh_token = config.get('dropbox_refresh_token')
+    app_key = config.get('dropbox_app_key')
+    app_secret = config.get('dropbox_app_secret')
+
+    if not access_token:
+        return None
+
+    if refresh_token and app_key and app_secret:
+        return dropbox.Dropbox(
+            oauth2_access_token=access_token,
+            oauth2_refresh_token=refresh_token,
+            app_key=app_key,
+            app_secret=app_secret
+        )
+
+    return dropbox.Dropbox(access_token)
+
+
+def get_dropbox_shared_link(filename):
+    """Get or create a shared link for a file in Dropbox."""
+    dbx = get_dropbox_client()
+    if not dbx:
+        return None
+
+    folder_path = config.get('dropbox_folder_path', '')
+    if not folder_path:
+        return None
+
+    if not folder_path.startswith('/'):
+        folder_path = '/' + folder_path
+    file_path = f"{folder_path.rstrip('/')}/{filename}"
+
+    try:
+        links = dbx.sharing_list_shared_links(path=file_path, direct_only=True).links
+        if links:
+            return links[0].url
+
+        shared_link = dbx.sharing_create_shared_link_with_settings(file_path)
+        return shared_link.url
+    except AuthError as e:
+        print(f"[DROPBOX] Auth error - token expired or invalid: {e}")
+        print("[DROPBOX] Please reconnect Dropbox in Settings")
+        return None
+    except ApiError as e:
+        print(f"[DROPBOX] Error getting link for {file_path}: {e}")
+        return None
+
+
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("BRIEF DRAFTER")
@@ -4077,4 +5498,4 @@ if __name__ == '__main__':
     print("\nUpload your documents, then let Claude draft your brief.")
     print("Press Ctrl+C to stop.\n")
 
-    app.run(debug=True, host='127.0.0.1', port=5003)
+    app.run(debug=False, host='127.0.0.1', port=5003)

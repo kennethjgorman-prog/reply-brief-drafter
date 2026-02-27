@@ -1,0 +1,124 @@
+================================================================================
+ANTI-HALLUCINATION PROTOCOL FOR APPELLATE BRIEF DRAFTING
+Distilled from Universal Litigation Transcript Protocol v9.4
+================================================================================
+
+ANTI-FABRICATION GUARDRAILS (MANDATORY)
+
+RULE_AH_01: CHUNK BOUNDARY INTEGRITY (adapted from RULE_022)
+  When working with transcript or record excerpts, NEVER guess at content
+  beyond what is provided. If a Q&A exchange appears incomplete, SKIP IT.
+  Do NOT fabricate a completion or summary of missing text.
+
+RULE_AH_02: VERBATIM SPELLING PRESERVATION (RULE_023)
+  NEVER "correct" words from transcripts or court documents. If the
+  transcript says "Popowitz," write "Popowitz," not "Popowicz." If the
+  record says "sidewalk," do not change it to "walkway." Every word must
+  match the source document exactly.
+
+RULE_AH_03: ZERO EMBELLISHMENT (RULE_024)
+  Do NOT add adjectives, adverbs, or modifiers not found in the source.
+  WRONG: "the clearly defective staircase" (source says "the staircase")
+  WRONG: "both the interior and exterior" (source says "the exterior")
+  SELF-CHECK: For every adjective or modifier, ask: "Can I point to this
+  exact word in the source document?" If NO, delete it.
+
+RULE_AH_04: NO GESTURE INTERPRETATION (RULE_025)
+  When a transcript contains "like this," "this way," or similar
+  demonstrative language, you MUST either:
+    (a) Quote the exact words in quotation marks, OR
+    (b) Write: "demonstrated [the action] physically (page)"
+  NEVER substitute a verbal description for a physical demonstration.
+
+RULE_AH_05: Q&A MAPPING DISCIPLINE (RULE_026)
+  Before writing any sentence about Q&A testimony:
+    1. Identify the EXACT question (Q.)
+    2. Identify the EXACT answer (A.) that follows it
+    3. Verify which answer goes with which question
+    4. For yes/no answers, verify whether the witness said YES or NO
+  CRITICAL: Inverting a yes/no answer is a fabrication.
+
+RULE_AH_06: SEMANTIC PRECISION (RULE_027)
+  When paraphrasing, preserve EXACT meaning:
+    (a) CONJUNCTION PRESERVATION: "or" is not "and"
+    (b) HEARSAY LAYERS: "told the crew he was going to find" is NOT
+        "was searching for" -- reported speech and direct action are
+        legally distinct
+    (c) REFERENT ACCURACY: Verify who/what pronouns refer to by
+        re-reading the full Q&A exchange
+
+RULE_AH_07: NO INFERRED DEMEANOR (RULE_028)
+  NEVER describe witness demeanor, emotions, or mental state unless the
+  transcript EXPLICITLY records it (e.g., "the Court notes the witness
+  appears upset"). You cannot see facial expressions or body language.
+  WRONG: "plaintiff initially appeared confused"
+  WRONG: "the witness hesitated before answering"
+
+RULE_AH_08: EXACT VERB PRESERVATION (RULE_029)
+  When the source uses a specific verb ("operate," "control," "manage"),
+  use THAT verb. Do NOT substitute legal synonyms.
+  WRONG: "owned and controlled" (source says "operate" and "control")
+  WRONG: "maintained the premises" (source says "managed the building")
+
+================================================================================
+WITNESS UNCERTAINTY PRESERVATION (MANDATORY)
+================================================================================
+
+RULE_AH_09: ABSOLUTE FIDELITY TO WITNESS LANGUAGE (RULE_015)
+  You are conveying what the witness SAID, not interpreting what they MEANT.
+  PROHIBITED TRANSFORMATIONS:
+    - Converting "I don't know" to definitive statements
+    - Converting hedged responses ("Well, I'm not going to claim... so yeah")
+      to firm agreement ("agreed that")
+    - Converting qualified answers to absolute statements
+    - Omitting uncertainty qualifiers ("would have been" becomes "was")
+    - Interpreting non-answers as answers
+
+RULE_AH_10: PRESERVE EXACT WITNESS LANGUAGE (RULE_016)
+    "I don't know"       -> "stated he did not know" (NOT a definitive fact)
+    "I don't remember"   -> "stated he could not recall"
+    "I'm not sure"       -> "indicated he was uncertain"
+    "I think so"         -> "stated he thought so" (NOT "confirmed")
+    "I believe"          -> "stated he believed" (NOT "testified that")
+    "Maybe" / "Possibly" -> "stated it was possible" (NOT definitive)
+    "I guess"            -> "stated 'I guess'" (NOT "acknowledged")
+    Hedged/qualified     -> QUOTE THE EXACT LANGUAGE
+
+RULE_AH_11: CONTRADICTORY ANSWERS (RULE_017)
+  If a witness says "No" then later provides details suggesting "Yes":
+    WRONG: Pick one answer and ignore the other
+    CORRECT: Report both: "Initially answered 'No,' but subsequently
+             confirmed [details] (page)"
+
+================================================================================
+5-QUESTION SELF-AUDIT (RUN ON EVERY SENTENCE)
+================================================================================
+
+Before writing each sentence that references testimony, ask:
+  1. Did the witness express certainty or uncertainty?
+  2. If uncertain, did I preserve their uncertainty?
+  3. Did I convert "I don't know" to a definitive statement?
+  4. Did I convert a hedged response to firm agreement?
+  5. Am I reporting what they SAID or what I THINK they meant?
+
+IF ANY RED FLAG: REWRITE to preserve exact witness language.
+
+================================================================================
+CASE LAW ANTI-FABRICATION (BRIEF-SPECIFIC)
+================================================================================
+
+When describing what happened in a cited case:
+  - Use ONLY the court's actual language
+  - Do NOT add adjectives, labels, or causal explanations the court did not use
+  - Do NOT put the opposing brief's CHARACTERIZATION of a case in quotes
+    and cite the case as if those were the court's words
+  - When in doubt, QUOTE the court's actual language
+
+  WRONG: In _Monroe_, "the bands snapped" due to a malfunction
+         (the court never said "malfunction" -- that is fabricated)
+  RIGHT: In _Monroe_, "one or more of the metal bands broke, causing
+         the logs to come loose" (_Monroe_ at 653)
+
+================================================================================
+END ANTI-HALLUCINATION PROTOCOL
+================================================================================

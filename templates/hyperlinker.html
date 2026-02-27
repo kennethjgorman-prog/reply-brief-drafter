@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NYSCEF Hyperlinker - Brief Drafter</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 2.2em;
+            margin-bottom: 8px;
+            background: linear-gradient(90deg, #ff6b6b, #ffa500);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header p {
+            color: #888;
+            font-size: 1.05em;
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: #888;
+            text-decoration: none;
+            font-size: 0.95em;
+        }
+        .back-link:hover { color: #ccc; }
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 30px;
+            border: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 24px;
+        }
+        .card h2 {
+            margin-bottom: 16px;
+            font-size: 1.2em;
+        }
+
+        /* Upload zone */
+        .upload-zone {
+            border: 2px dashed rgba(255,255,255,0.2);
+            border-radius: 12px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .upload-zone:hover, .upload-zone.drag-over {
+            border-color: #ff6b6b;
+            background: rgba(255,107,107,0.05);
+        }
+        .upload-zone.has-file {
+            border-color: #00ff88;
+            background: rgba(0,255,136,0.05);
+        }
+        .upload-zone .icon { font-size: 36px; margin-bottom: 10px; }
+        .upload-zone .label { color: #888; font-size: 0.95em; }
+        .upload-zone .filename {
+            color: #00ff88;
+            font-weight: 600;
+            font-size: 1.05em;
+            margin-top: 6px;
+        }
+        .upload-zone input[type="file"] { display: none; }
+
+        /* Volume cards */
+        .volume-entry {
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 14px;
+            background: rgba(255,255,255,0.03);
+        }
+        .volume-entry.uploaded {
+            border-color: rgba(0,255,136,0.3);
+        }
+        .volume-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .volume-header .vol-title {
+            font-weight: 600;
+            font-size: 0.95em;
+        }
+        .volume-entry label {
+            display: block;
+            font-size: 0.8em;
+            color: #888;
+            margin-bottom: 4px;
+        }
+        .volume-entry input[type="text"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.05);
+            color: #fff;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .volume-entry input[type="text"]:focus {
+            outline: none;
+            border-color: #ff6b6b;
+        }
+        .volume-entry input::placeholder { color: #555; }
+        .vol-pdf-zone {
+            border: 1px dashed rgba(255,255,255,0.15);
+            border-radius: 8px;
+            padding: 14px;
+            text-align: center;
+            cursor: pointer;
+            font-size: 0.9em;
+            color: #888;
+            transition: all 0.2s;
+        }
+        .vol-pdf-zone:hover {
+            border-color: #ff6b6b;
+            color: #ccc;
+        }
+        .vol-pdf-zone.has-file {
+            border-color: rgba(0,255,136,0.3);
+            color: #00ff88;
+        }
+        .vol-pdf-zone input[type="file"] { display: none; }
+        .vol-status {
+            font-size: 0.8em;
+            margin-top: 6px;
+            color: #888;
+        }
+        .vol-status.success { color: #00ff88; }
+        .vol-status.error { color: #ff6b6b; }
+
+        .btn-remove-vol {
+            padding: 4px 12px;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            background: rgba(255,50,50,0.1);
+            color: #ff6b6b;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+        .btn-remove-vol:hover { background: rgba(255,50,50,0.25); }
+        .btn-add-vol {
+            padding: 8px 16px;
+            border: 1px dashed rgba(255,255,255,0.2);
+            border-radius: 8px;
+            background: transparent;
+            color: #888;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-top: 4px;
+        }
+        .btn-add-vol:hover {
+            border-color: #ff6b6b;
+            color: #ff6b6b;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 14px 28px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+        }
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .btn-primary {
+            background: linear-gradient(90deg, #ff6b6b, #ffa500);
+            color: #000;
+        }
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(255, 107, 107, 0.4);
+        }
+        .btn-download {
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            color: #000;
+            margin-top: 12px;
+        }
+        .btn-download:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0,217,255,0.4);
+        }
+
+        /* Status */
+        .status-msg {
+            text-align: center;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 12px;
+            font-size: 0.95em;
+            display: none;
+        }
+        .status-msg.success {
+            display: block;
+            background: rgba(0,255,136,0.1);
+            color: #00ff88;
+            border: 1px solid rgba(0,255,136,0.2);
+        }
+        .status-msg.error {
+            display: block;
+            background: rgba(255,50,50,0.1);
+            color: #ff6b6b;
+            border: 1px solid rgba(255,50,50,0.2);
+        }
+        .status-msg.processing {
+            display: block;
+            background: rgba(255,193,7,0.1);
+            color: #ffc107;
+            border: 1px solid rgba(255,193,7,0.2);
+        }
+
+        .step-number {
+            display: inline-block;
+            width: 28px;
+            height: 28px;
+            line-height: 28px;
+            text-align: center;
+            border-radius: 50%;
+            background: rgba(255,107,107,0.2);
+            color: #ff6b6b;
+            font-weight: 700;
+            font-size: 0.85em;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" class="back-link">&larr; Back to Brief Drafter</a>
+        <div class="header">
+            <h1>NYSCEF Hyperlinker</h1>
+            <p>Upload a .docx brief and add clickable NYSCEF record citation links</p>
+        </div>
+
+        <!-- Step 1: Upload -->
+        <div class="card">
+            <h2><span class="step-number">1</span>Upload Brief (.docx)</h2>
+            <div class="upload-zone" id="uploadZone">
+                <div class="icon" id="uploadIcon">&#128196;</div>
+                <div class="label" id="uploadLabel">Drop a .docx file here or click to browse</div>
+                <div class="filename" id="uploadFilename" style="display:none;"></div>
+                <input type="file" id="fileInput" accept=".docx">
+            </div>
+        </div>
+
+        <!-- Step 2: Volume config -->
+        <div class="card" id="volumeCard" style="opacity: 0.4; pointer-events: none;">
+            <h2><span class="step-number">2</span>Record Volumes</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 16px;">
+                For each volume: paste the NYSCEF URL and upload the PDF from your local files. Page labels will be read automatically.
+            </p>
+            <div id="volumeList">
+                <!-- Volume entries inserted here -->
+            </div>
+            <button class="btn-add-vol" id="addVolumeBtn">+ Add Volume</button>
+        </div>
+
+        <!-- Step 3: Process -->
+        <div class="card" id="processCard" style="opacity: 0.4; pointer-events: none;">
+            <h2><span class="step-number">3</span>Process</h2>
+            <button class="btn btn-primary" id="processBtn" disabled>Add Hyperlinks</button>
+            <div class="status-msg" id="statusMsg"></div>
+            <button class="btn btn-download" id="downloadBtn" style="display:none;">Download Hyperlinked Brief</button>
+        </div>
+    </div>
+
+    <script>
+        let sessionId = null;
+        let volumeCount = 0;
+        let uploadedVolumes = 0; // how many volumes have been successfully uploaded
+
+        // --- Upload ---
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const uploadIcon = document.getElementById('uploadIcon');
+        const uploadLabel = document.getElementById('uploadLabel');
+        const uploadFilename = document.getElementById('uploadFilename');
+
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+        uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+        uploadZone.addEventListener('drop', e => {
+            e.preventDefault();
+            uploadZone.classList.remove('drag-over');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleUpload(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleUpload(fileInput.files[0]);
+        });
+
+        async function handleUpload(file) {
+            if (!file.name.toLowerCase().endsWith('.docx')) {
+                alert('Please upload a .docx file');
+                return;
+            }
+            uploadLabel.textContent = 'Uploading...';
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const resp = await fetch('/hyperlinker/upload', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (data.error) {
+                    uploadLabel.textContent = data.error;
+                    return;
+                }
+                sessionId = data.session_id;
+                uploadZone.classList.add('has-file');
+                uploadIcon.textContent = '\u2705';
+                uploadLabel.style.display = 'none';
+                uploadFilename.textContent = data.filename;
+                uploadFilename.style.display = 'block';
+                // Enable step 2
+                document.getElementById('volumeCard').style.opacity = '1';
+                document.getElementById('volumeCard').style.pointerEvents = 'auto';
+                if (document.querySelectorAll('.volume-entry').length === 0) addVolumeEntry();
+                updateProcessBtn();
+            } catch (err) {
+                uploadLabel.textContent = 'Upload failed: ' + err.message;
+            }
+        }
+
+        // --- Volume Config ---
+        const volumeList = document.getElementById('volumeList');
+        document.getElementById('addVolumeBtn').addEventListener('click', addVolumeEntry);
+
+        function addVolumeEntry() {
+            volumeCount++;
+            const entry = document.createElement('div');
+            entry.className = 'volume-entry';
+            entry.dataset.volNum = volumeCount;
+            entry.innerHTML = `
+                <div class="volume-header">
+                    <span class="vol-title">Volume ${volumeCount}</span>
+                    <button class="btn-remove-vol">Remove</button>
+                </div>
+                <label>NYSCEF URL</label>
+                <input type="text" class="vol-url" placeholder="https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex=...">
+                <label>Record Volume PDF</label>
+                <div class="vol-pdf-zone">
+                    Click to upload PDF (same file you filed on NYSCEF)
+                    <input type="file" accept=".pdf">
+                </div>
+                <div class="vol-status"></div>
+            `;
+
+            const pdfZone = entry.querySelector('.vol-pdf-zone');
+            const pdfInput = entry.querySelector('input[type="file"]');
+            const urlInput = entry.querySelector('.vol-url');
+            const statusDiv = entry.querySelector('.vol-status');
+
+            pdfZone.addEventListener('click', () => pdfInput.click());
+            pdfZone.addEventListener('dragover', e => { e.preventDefault(); pdfZone.style.borderColor = '#ff6b6b'; });
+            pdfZone.addEventListener('dragleave', () => { pdfZone.style.borderColor = ''; });
+            pdfZone.addEventListener('drop', e => {
+                e.preventDefault();
+                pdfZone.style.borderColor = '';
+                if (e.dataTransfer.files.length) {
+                    pdfInput.files = e.dataTransfer.files;
+                    handleVolumeUpload(entry);
+                }
+            });
+            pdfInput.addEventListener('change', () => handleVolumeUpload(entry));
+
+            entry.querySelector('.btn-remove-vol').addEventListener('click', () => {
+                const vi = entry.dataset.serverIndex;
+                if (vi !== undefined) {
+                    fetch('/hyperlinker/remove-volume', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId, vol_index: parseInt(vi) })
+                    });
+                    uploadedVolumes--;
+                }
+                entry.remove();
+                updateProcessBtn();
+            });
+
+            volumeList.appendChild(entry);
+            updateProcessBtn();
+        }
+
+        async function handleVolumeUpload(entry) {
+            const pdfInput = entry.querySelector('input[type="file"]');
+            const urlInput = entry.querySelector('.vol-url');
+            const pdfZone = entry.querySelector('.vol-pdf-zone');
+            const statusDiv = entry.querySelector('.vol-status');
+
+            const file = pdfInput.files[0];
+            if (!file) return;
+
+            const nyscefUrl = urlInput.value.trim();
+            if (!nyscefUrl) {
+                statusDiv.className = 'vol-status error';
+                statusDiv.textContent = 'Enter the NYSCEF URL first';
+                return;
+            }
+
+            statusDiv.className = 'vol-status';
+            statusDiv.textContent = 'Uploading and parsing page labels...';
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('session_id', sessionId);
+            formData.append('nyscef_url', nyscefUrl);
+
+            try {
+                const resp = await fetch('/hyperlinker/upload-volume', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (data.error) {
+                    statusDiv.className = 'vol-status error';
+                    statusDiv.textContent = data.error;
+                    return;
+                }
+                entry.classList.add('uploaded');
+                entry.dataset.serverIndex = data.vol_index;
+                pdfZone.classList.add('has-file');
+                pdfZone.textContent = file.name;
+                statusDiv.className = 'vol-status success';
+                statusDiv.textContent = data.label_count + ' page labels found';
+                uploadedVolumes++;
+                updateProcessBtn();
+            } catch (err) {
+                statusDiv.className = 'vol-status error';
+                statusDiv.textContent = 'Upload failed: ' + err.message;
+            }
+        }
+
+        function updateProcessBtn() {
+            const ready = sessionId && uploadedVolumes > 0;
+            const processCard = document.getElementById('processCard');
+            const processBtn = document.getElementById('processBtn');
+            processCard.style.opacity = ready ? '1' : '0.4';
+            processCard.style.pointerEvents = ready ? 'auto' : 'none';
+            processBtn.disabled = !ready;
+        }
+
+        // --- Process ---
+        document.getElementById('processBtn').addEventListener('click', async () => {
+            const statusMsg = document.getElementById('statusMsg');
+            const processBtn = document.getElementById('processBtn');
+            const downloadBtn = document.getElementById('downloadBtn');
+
+            processBtn.disabled = true;
+            processBtn.textContent = 'Processing...';
+            downloadBtn.style.display = 'none';
+            statusMsg.className = 'status-msg processing';
+            statusMsg.textContent = 'Reading page labels and adding hyperlinks...';
+
+            try {
+                const resp = await fetch('/hyperlinker/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId })
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    statusMsg.className = 'status-msg error';
+                    statusMsg.textContent = data.error;
+                    processBtn.disabled = false;
+                    processBtn.textContent = 'Add Hyperlinks';
+                    return;
+                }
+                statusMsg.className = 'status-msg success';
+                statusMsg.textContent = data.link_count + ' citation' + (data.link_count !== 1 ? 's' : '') + ' hyperlinked across ' + data.volumes_parsed + ' volume' + (data.volumes_parsed !== 1 ? 's' : '');
+                downloadBtn.style.display = 'block';
+                processBtn.textContent = 'Add Hyperlinks';
+                processBtn.disabled = false;
+            } catch (err) {
+                statusMsg.className = 'status-msg error';
+                statusMsg.textContent = 'Error: ' + err.message;
+                processBtn.disabled = false;
+                processBtn.textContent = 'Add Hyperlinks';
+            }
+        });
+
+        // --- Download ---
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            window.location.href = '/hyperlinker/download?session_id=' + sessionId;
+        });
+    </script>
+</body>
+</html>
