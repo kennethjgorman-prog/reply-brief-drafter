@@ -1,0 +1,82 @@
+"""
+BriefDrafter project I/O: file extraction, project load/save.
+"""
+
+import json
+import fcntl
+from pathlib import Path
+
+import pdfplumber
+from docx import Document as DocxDocument
+
+from src.config import PROJECTS_DIR, ALLOWED_EXTENSIONS
+
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def extract_text(file_path: Path) -> str:
+    """Extract text from PDF, DOCX, or TXT file"""
+    ext = file_path.suffix.lower()
+
+    if ext == '.pdf':
+        text_parts = []
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for i, page in enumerate(pdf.pages, 1):
+                    page_text = page.extract_text() or ""
+                    if page_text.strip():
+                        # Use printed page number from top of page if available
+                        first_line = page_text.strip().split('\n')[0].strip()
+                        if first_line.isdigit():
+                            page_label = first_line
+                        else:
+                            page_label = str(i)
+                        text_parts.append(f"--- PAGE {page_label} ---\n{page_text}")
+        except Exception as e:
+            return f"Error reading PDF: {e}"
+        return "\n\n".join(text_parts)
+
+    elif ext == '.docx':
+        try:
+            doc = DocxDocument(str(file_path))
+            return '\n\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
+        except Exception as e:
+            return f"Error reading DOCX: {e}"
+
+    else:  # .txt
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            return f"Error reading file: {e}"
+
+
+def get_project(project_id: str) -> dict:
+    """Load project data with backward-compat migration"""
+    project_file = PROJECTS_DIR / project_id / 'project.json'
+    if project_file.exists():
+        with open(project_file, 'r') as f:
+            data = json.load(f)
+        # Migrate legacy projects that lack brief_type
+        if 'brief_type' not in data:
+            data['brief_type'] = 'reply'
+            data['representing'] = 'appellant'
+            save_project(project_id, data)
+        return data
+    return None
+
+
+def save_project(project_id: str, data: dict):
+    """Save project data with file locking to prevent race conditions"""
+    project_dir = PROJECTS_DIR / project_id
+    project_dir.mkdir(exist_ok=True)
+    lock_file = project_dir / '.project.lock'
+    with open(lock_file, 'w') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            with open(project_dir / 'project.json', 'w') as f:
+                json.dump(data, f, indent=2)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)

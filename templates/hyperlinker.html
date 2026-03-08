@@ -254,17 +254,17 @@
         <a href="/" class="back-link">&larr; Back to Brief Drafter</a>
         <div class="header">
             <h1>NYSCEF Hyperlinker</h1>
-            <p>Upload a .docx brief and add clickable NYSCEF record citation links</p>
+            <p>Upload a .docx or .pdf brief and add clickable NYSCEF record citation links</p>
         </div>
 
         <!-- Step 1: Upload -->
         <div class="card">
-            <h2><span class="step-number">1</span>Upload Brief (.docx)</h2>
+            <h2><span class="step-number">1</span>Upload Brief (.docx or .pdf)</h2>
             <div class="upload-zone" id="uploadZone">
                 <div class="icon" id="uploadIcon">&#128196;</div>
-                <div class="label" id="uploadLabel">Drop a .docx file here or click to browse</div>
+                <div class="label" id="uploadLabel">Drop a .docx or .pdf file here or click to browse</div>
                 <div class="filename" id="uploadFilename" style="display:none;"></div>
-                <input type="file" id="fileInput" accept=".docx">
+                <input type="file" id="fileInput" accept=".docx,.pdf">
             </div>
         </div>
 
@@ -317,8 +317,9 @@
         });
 
         async function handleUpload(file) {
-            if (!file.name.toLowerCase().endsWith('.docx')) {
-                alert('Please upload a .docx file');
+            const lowerName = file.name.toLowerCase();
+            if (!lowerName.endsWith('.docx') && !lowerName.endsWith('.pdf')) {
+                alert('Please upload a .docx or .pdf file');
                 return;
             }
             uploadLabel.textContent = 'Uploading...';
