@@ -384,6 +384,92 @@
             to { transform: rotate(360deg); }
         }
 
+        /* Supplement Section */
+        .supplement-section {
+            margin-top: 16px;
+            background: rgba(100,200,255,0.03);
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid rgba(100,200,255,0.1);
+            display: none;
+        }
+        .supplement-section.show { display: block; }
+        .supplement-section h4 {
+            color: #64c8ff;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        .supplement-section p {
+            color: #888;
+            font-size: 0.82em;
+            margin-bottom: 12px;
+        }
+        .supplement-checklist {
+            margin-bottom: 12px;
+        }
+        .supplement-checklist label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            margin-bottom: 4px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.85em;
+            color: #ccc;
+            cursor: pointer;
+        }
+        .supplement-checklist label:hover {
+            background: rgba(100,200,255,0.05);
+            border-color: rgba(100,200,255,0.2);
+        }
+        .supplement-checklist input[type="checkbox"] {
+            accent-color: #64c8ff;
+        }
+        .supplement-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .supplement-result {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 0.85em;
+            display: none;
+        }
+        .supplement-result.success {
+            background: rgba(100,200,100,0.1);
+            border: 1px solid rgba(100,200,100,0.3);
+            color: #8f8;
+        }
+        .supplement-result.error {
+            background: rgba(255,100,100,0.1);
+            border: 1px solid rgba(255,100,100,0.3);
+            color: #f88;
+        }
+        .supplement-status {
+            display: none;
+            margin-top: 12px;
+            text-align: center;
+            color: #888;
+        }
+        .supplement-status .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.2);
+            border-top-color: #64c8ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+
         /* Brief Structure Card */
         .brief-structure textarea,
         .brief-structure input[type="text"] {
@@ -543,7 +629,7 @@
 
                 <!-- Import Summary Modal -->
                 <div id="importSummaryModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000;">
-                    <div style="background:#1e1e2e; margin:8vh auto; width:90%; max-width:550px; padding:20px; border:1px solid #444; border-radius:8px; max-height:80vh; overflow-y:auto;">
+                    <div style="background:#1e1e2e; margin:8vh auto; width:90%; max-width:750px; padding:20px; border:1px solid #444; border-radius:8px; max-height:80vh; overflow-y:auto;">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
                             <h3 style="margin:0; color:#fff;">Import Transcript Summaries</h3>
                             <button onclick="hideImportSummaryModal()" style="background:none; border:none; color:#888; font-size:1.2em; cursor:pointer;">&times;</button>
@@ -692,6 +778,22 @@
                             <span class="spinner"></span> Revising brief...
                         </div>
                     </div>
+
+                    <div class="supplement-section {% if project.drafted_sections and project.drafted_sections.full_brief %}show{% endif %}" id="supplementSection">
+                        <h4>Supplement with New Evidence</h4>
+                        <p>Add new facts from transcript summaries to the existing brief. The brief is preserved verbatim; only net-new facts are inserted at appropriate locations.</p>
+                        <div class="supplement-checklist" id="supplementChecklist">
+                            <!-- Populated dynamically -->
+                        </div>
+                        <div class="supplement-meta">
+                            <span style="font-size:0.78em; color:#666;" id="supplementInfo"></span>
+                            <button class="btn btn-primary" style="width: auto; padding: 10px 24px; margin: 0; background: linear-gradient(135deg, #2196F3, #00BCD4);" id="supplementBtn" onclick="submitSupplement()">Supplement Brief</button>
+                        </div>
+                        <div class="supplement-status" id="supplementStatus">
+                            <span class="spinner"></span> Supplementing brief with new evidence...
+                        </div>
+                        <div class="supplement-result" id="supplementResult"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -701,6 +803,109 @@
         const projectId = "{{ project.id }}";
         const briefType = "{{ project.brief_type }}";
         let pointCounter = 0;
+
+        // === Supplement Eligible Docs (transcript summaries) ===
+        const supplementEligibleDocs = [];
+        {% for key, doc in project.documents.items() %}
+        {% if doc.source == 'transcript_summarizer' and doc.text %}
+        supplementEligibleDocs.push({
+            key: '{{ key }}',
+            filename: {{ doc.filename | tojson }},
+            chars: {{ doc.char_count | default(0) }}
+        });
+        {% endif %}
+        {% endfor %}
+
+        function populateSupplementChecklist() {
+            const container = document.getElementById('supplementChecklist');
+            if (supplementEligibleDocs.length === 0) {
+                container.innerHTML = '<p style="color:#666; font-size:0.82em; font-style:italic;">No transcript summaries imported yet. Import summaries from Transcript Summarizer first.</p>';
+                document.getElementById('supplementBtn').disabled = true;
+                document.getElementById('supplementBtn').style.opacity = '0.4';
+                return;
+            }
+            let html = '';
+            for (const doc of supplementEligibleDocs) {
+                const kChars = Math.round(doc.chars / 1000);
+                html += `<label>
+                    <input type="checkbox" value="${doc.key}" checked>
+                    <span>${doc.filename}</span>
+                    <span style="color:#666; font-size:0.8em; margin-left:auto;">${kChars}K chars</span>
+                </label>`;
+            }
+            container.innerHTML = html;
+            document.getElementById('supplementBtn').disabled = false;
+            document.getElementById('supplementBtn').style.opacity = '1';
+        }
+
+        async function submitSupplement() {
+            const checkboxes = document.querySelectorAll('#supplementChecklist input[type="checkbox"]:checked');
+            const docKeys = Array.from(checkboxes).map(cb => cb.value);
+            const resultEl = document.getElementById('supplementResult');
+            const statusEl = document.getElementById('supplementStatus');
+            const btnEl = document.getElementById('supplementBtn');
+            const area = document.getElementById('draftArea');
+
+            resultEl.style.display = 'none';
+
+            if (docKeys.length === 0) {
+                resultEl.className = 'supplement-result error';
+                resultEl.textContent = 'Select at least one transcript summary to supplement with.';
+                resultEl.style.display = 'block';
+                return;
+            }
+
+            btnEl.disabled = true;
+            btnEl.style.opacity = '0.5';
+            statusEl.style.display = 'block';
+
+            try {
+                const response = await fetch(`/project/${projectId}/supplement`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        supplement_doc_keys: docKeys,
+                        model: document.getElementById('modelSelect').value
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    let msg = data.error;
+                    if (data.violations && data.violations.length > 0) {
+                        msg += '\n\nViolations:\n' + data.violations.map(v => '\u2022 ' + v).join('\n');
+                    }
+                    resultEl.className = 'supplement-result error';
+                    resultEl.textContent = msg;
+                    resultEl.style.whiteSpace = 'pre-wrap';
+                    resultEl.style.display = 'block';
+                    return;
+                }
+
+                // Update draft display
+                area.classList.remove('empty');
+                window.currentBriefText = data.supplemented_brief;
+                area.innerHTML = formatBriefText(data.supplemented_brief);
+                document.getElementById('revisionCount').textContent = `Revision ${data.revision_count}`;
+
+                // Show success
+                const wordsSign = data.words_added >= 0 ? '+' : '';
+                const citesSign = data.cites_added >= 0 ? '+' : '';
+                resultEl.className = 'supplement-result success';
+                resultEl.textContent = `Supplemented successfully: ${wordsSign}${data.words_added} words, ${citesSign}${data.cites_added} citations`;
+                resultEl.style.display = 'block';
+
+            } catch (error) {
+                resultEl.className = 'supplement-result error';
+                resultEl.textContent = 'Supplement failed: ' + error.message;
+                resultEl.style.display = 'block';
+            } finally {
+                btnEl.disabled = false;
+                btnEl.style.opacity = '1';
+                statusEl.style.display = 'none';
+            }
+        }
 
         // === Import from Transcript Summarizer ===
         function showImportSummaryModal() {
@@ -726,12 +931,22 @@
                     const pages = job.pages_processed ? job.pages_processed + ' pages' : '';
                     const cites = job.citation_count ? job.citation_count + ' citations' : '';
                     const meta = [pages, cites, chars].filter(Boolean).join(' \u00b7 ');
+                    let buttons = `<button onclick="importSummary('${job.job_id}')" class="btn btn-secondary" style="font-size:0.8em; padding:4px 12px; background:rgba(100,200,255,0.2); border:1px solid rgba(100,200,255,0.4); color:#64c8ff;">Import Full</button>`;
+                    if (job.has_filtered) {
+                        const fChars = Math.round(job.filtered_char_count / 1000);
+                        const filterLabel = job.filter_prompt ? job.filter_prompt.substring(0, 40) : 'filtered';
+                        buttons = `<div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end; min-width:160px;">
+                            <button onclick="importSummary('${job.job_id}', true)" style="font-size:0.85em; padding:8px 16px; background:#2d5a2d; border:2px solid #4a4; color:#4f4; border-radius:4px; cursor:pointer; font-weight:bold; width:100%;">FILTERED (${fChars}K)</button>
+                            <button onclick="importSummary('${job.job_id}')" style="font-size:0.7em; padding:4px 10px; background:none; border:1px solid #555; color:#888; border-radius:4px; cursor:pointer; width:100%;">Full (${chars})</button>
+                        </div>`;
+                    }
                     html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:10px; margin-bottom:6px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:6px;">
-                        <div>
-                            <div style="color:#fff; font-size:0.9em;">${job.filename}</div>
+                        <div style="flex:1; margin-right:10px; min-width:0;">
+                            <div style="color:#fff; font-size:0.9em; word-break:break-all;">${job.filename}</div>
                             <div style="color:#888; font-size:0.75em;">${meta}</div>
+                            ${job.has_filtered && job.filter_prompt ? `<div style="color:#8f8; font-size:0.7em; margin-top:2px;">Filtered: ${job.filter_prompt.substring(0, 60)}${job.filter_prompt.length > 60 ? '...' : ''}</div>` : ''}
                         </div>
-                        <button onclick="importSummary('${job.job_id}')" class="btn btn-secondary" style="font-size:0.8em; padding:4px 12px; background:rgba(100,200,255,0.2); border:1px solid rgba(100,200,255,0.4); color:#64c8ff;">Import</button>
+                        ${buttons}
                     </div>`;
                 }
                 list.innerHTML = html;
@@ -739,7 +954,7 @@
                 list.innerHTML = '<p style="color:#f66;">Failed to load summaries: ' + e.message + '</p>';
             }
         }
-        async function importSummary(jobId) {
+        async function importSummary(jobId, useFiltered) {
             let docType = document.getElementById('importDocType').value;
             if (docType === 'source_doc') {
                 // Find next available source_doc number
@@ -752,10 +967,12 @@
                 docType = `source_doc_${maxNum + 1}`;
             }
             try {
+                const body = {job_id: jobId, doc_type: docType};
+                if (useFiltered) body.use_filtered = true;
                 const resp = await fetch(`/project/${projectId}/import-summary`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({job_id: jobId, doc_type: docType})
+                    body: JSON.stringify(body)
                 });
                 const data = await resp.json();
                 if (data.success) {
@@ -770,6 +987,13 @@
                             customList.innerHTML += `<div style="padding:6px 0;font-size:0.85em;"><span style="color:#64c8ff;">${data.filename}</span> <span style="color:#888;">(${docType}, ${Math.round(data.char_count/1000)}K chars)</span></div>`;
                         }
                     }
+                    // Update supplement checklist
+                    supplementEligibleDocs.push({
+                        key: docType,
+                        filename: data.filename,
+                        chars: data.char_count
+                    });
+                    populateSupplementChecklist();
                     hideImportSummaryModal();
                 } else {
                     alert(data.error || 'Import failed');
@@ -1694,7 +1918,7 @@
                     if (sectionType === 'facts' || sectionType === 'experts') {
                         defaultChecked = isSourceDoc;
                     } else if (sectionType === 'procedural_history') {
-                        defaultChecked = !isSourceDoc;
+                        defaultChecked = true;
                     } else {
                         defaultChecked = true;
                     }
@@ -1852,6 +2076,8 @@
         // Show/hide revise section
         function showReviseSection(revisionCount) {
             document.getElementById('reviseSection').classList.add('show');
+            document.getElementById('supplementSection').classList.add('show');
+            populateSupplementChecklist();
             if (revisionCount > 0) {
                 document.getElementById('revisionCount').textContent = `Revision ${revisionCount}`;
             }

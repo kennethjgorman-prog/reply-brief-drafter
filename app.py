@@ -20,14 +20,14 @@ from src.config import PROJECTS_DIR, BRIEF_TYPE_CONFIG, ALLOWED_EXTENSIONS, MAX_
 from src.project_io import get_project, save_project, extract_text, allowed_file
 from src.text_processing import _strip_opposing_brief_chrome, _truncate, _fit_documents, _extract_search_terms, _search_record_pages
 from src.claude_client import call_claude, call_claude_with_docs
-from src.guardrails import validate_citations, enforce_paragraph_cites, enforce_case_cites, guardrail_brief, _replace_party_surname, count_brief_metrics, validate_revision_integrity
+from src.guardrails import validate_citations, enforce_paragraph_cites, enforce_case_cites, guardrail_brief, _replace_party_surname, count_brief_metrics, validate_revision_integrity, validate_supplement_integrity
 from src.prompt_builders import (
     _build_drafting_protocol, _build_anti_hallucination_block,
     _build_writing_style, _build_exemplars, _build_structure_prompt,
     _strip_attorney_names, _build_party_label_constraint,
     build_intro_task, build_argument_task, build_conclusion_task,
     build_facts_task, build_procedural_history_task, build_expert_opinions_task,
-    build_custom_section_task, build_revision_prompt,
+    build_custom_section_task, build_revision_prompt, build_supplement_prompt,
 )
 from src.document_gathering import (
     _gather_additional_docs, _gather_respondent_briefs, _preprocess_opening_brief,
@@ -317,6 +317,9 @@ def import_summaries(project_id):
                     'citation_count': jdata.get('citation_count', 0),
                     'has_narrative': bool(jdata.get('narrative_text')),
                     'char_count': len(jdata.get('narrative_text', '')),
+                    'has_filtered': bool(jdata.get('filtered_narrative')),
+                    'filtered_char_count': len(jdata.get('filtered_narrative', '')),
+                    'filter_prompt': jdata.get('filter_prompt', ''),
                 })
             except Exception:
                 continue
@@ -344,8 +347,12 @@ def import_summary(project_id):
     if jdata.get('status') != 'completed':
         return jsonify({'error': 'Job not yet completed'}), 400
 
-    # Get narrative text — prefer stored field, fall back to DOCX extraction
-    narrative = jdata.get('narrative_text', '')
+    # Get narrative text — use filtered version if requested, fall back to full
+    use_filtered = data.get('use_filtered', False)
+    if use_filtered and jdata.get('filtered_narrative'):
+        narrative = jdata['filtered_narrative']
+    else:
+        narrative = jdata.get('narrative_text', '')
     if not narrative and jdata.get('output_file'):
         try:
             from docx import Document as DocxDocument
@@ -358,7 +365,13 @@ def import_summary(project_id):
         return jsonify({'error': 'No narrative text available in this job'}), 400
 
     fname = jdata.get('filename', 'Transcript')
-    deponent = fname.rsplit('.', 1)[0].replace('_', ' ')
+    # Extract clean deponent name from filename
+    import re as _re
+    deponent_match = _re.search(r'DEPOSITION_OF_([A-Z_]+?)_DATED', fname)
+    if deponent_match:
+        deponent = deponent_match.group(1).replace('_', ' ').title()
+    else:
+        deponent = fname.rsplit('.', 1)[0].replace('_', ' ')
 
     project_dir = PROJECTS_DIR / project_id
     lock_file = project_dir / '.project.lock'
@@ -366,8 +379,13 @@ def import_summary(project_id):
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             project = get_project(project_id)
+            # Always use transcript_digest_N slots for summarizer imports
+            n = 1
+            while f'transcript_digest_{n}' in project['documents']:
+                n += 1
+            doc_type = f'transcript_digest_{n}'
             project['documents'][doc_type] = {
-                'filename': f'{deponent} (Summary).txt',
+                'filename': f'{deponent} ({"Filtered" if use_filtered else "Full"})',
                 'path': f'imported_from_summarizer:{job_id}',
                 'text': narrative,
                 'char_count': len(narrative),
@@ -650,29 +668,39 @@ Weaknesses to Exploit in Reply: {arg.get('weaknesses', '')}
             record_index_block = _format_record_index_for_prompt(record_index)
 
     if section_type == 'procedural_history':
-        prompt = f"""You are a senior appellate attorney preparing a PROCEDURAL HISTORY section for an appellate brief. You are NOT drafting a Statement of Facts. You are NOT drafting argument. You are documenting WHAT HAPPENED IN THE LITIGATION — what papers were filed, what arguments each party made in their papers, what evidence each party submitted to the court, and what the court decided.
+        prompt = f"""You are a senior appellate attorney preparing a PROCEDURAL HISTORY section for an appellate brief. Your job is to produce a THOROUGH, DETAILED account of the motion practice in this case. This is not a summary — it is a comprehensive narrative of the litigation.
 
-MANDATORY STYLE RULE — ATTORNEY NAMES AND DATES:
-NEVER include the name of any attorney in the procedural history. Do not write "the affirmation of Brian J. Isaac, Esq." or "Robert M. Lefland, Esq. argued" or "Joseph Deliso, Esq." or any similar construction. Refer to parties only as "plaintiff," "defendants," or "the court." Attorneys are invisible in a procedural history.
-The only dates that belong in a procedural history are: (1) dates of motions and cross-motions, (2) dates of court orders, and (3) dates of procedural events (filing of complaint, note of issue, depositions). Do NOT include dates for opposition papers, reply papers, expert affidavits, or any responsive submission.
-CORRECT: "In opposition, plaintiff argued that..."
-INCORRECT: "In his affirmation dated July 17, 2024, Brian J. Isaac, Esq. argued that..."
+DEPTH AND THOROUGHNESS — THIS IS THE #1 PRIORITY:
+For EACH motion or cross-motion, you MUST cover ALL of the following in detail:
+1. THE MOTION: What relief was sought, what legal grounds were asserted, what specific arguments the moving party made. Devote 2-4 substantive paragraphs to each motion. Describe EACH argument with specificity — do not generalize. If the moving party argued three separate grounds for summary judgment, describe all three.
+2. THE OPPOSITION: What arguments plaintiff/defendant made in response. Cover EACH counter-argument with the same detail as the motion. If the opposing party raised issues of fact, describe what those factual disputes were. If an expert was submitted, state the expert's name, credentials, and the substance of their opinions (not just "plaintiff submitted an expert").
+3. THE REPLY: What the moving party argued in reply, particularly any new arguments or responses to the opposition's expert evidence.
+4. THE COURT'S DECISION: What the court ruled on each branch of the motion and the court's reasoning for each ruling. If the court granted in part and denied in part, cover each part separately.
+
+A superficial procedural history that glosses over arguments with vague summaries like "defendants argued they were entitled to summary judgment" is UNACCEPTABLE. You must describe WHAT specifically they argued and WHY.
+
+STRUCTURE — ORGANIZE BY MOTION:
+Use subheadings to organize the procedural history by motion/cross-motion. Under each motion, present the motion, opposition, reply, and ruling in that order. Example structure:
+- Defendants Clinton Hill's Motion for Summary Judgment
+  (motion arguments, opposition arguments, reply arguments, court ruling)
+- Defendants Hoffman and Elrauch's Motion for Summary Judgment
+  (motion arguments, opposition arguments, reply arguments, court ruling)
+
+MANDATORY STYLE RULES:
+- NEVER include attorney names. Refer to parties only as "plaintiff," "defendants," or "the court."
+- Dates: include ONLY for (1) motions/cross-motions, (2) court orders, (3) procedural events (complaint, note of issue, depositions). No dates for opposition or reply papers.
+- CORRECT: "In opposition, plaintiff argued that..."
+- INCORRECT: "In his affirmation dated July 17, 2024, Brian J. Isaac, Esq. argued that..."
 
 CRITICAL DISTINCTION — DO NOT VIOLATE:
 A Procedural History describes the LITIGATION PROCESS: motions filed, arguments made in papers, court rulings.
-A Statement of Facts describes the UNDERLYING EVENTS: the accident, the building, the lease terms, expert opinions as evidence.
-
-YOU MUST NOT narrate accident facts, describe physical conditions, recite lease provisions as standalone facts, or summarize expert opinions outside the context of "Party X submitted expert Y who opined that..."
-
+A Statement of Facts describes the UNDERLYING EVENTS: the accident, the building, the lease terms.
 YOU MUST frame everything as litigation activity: "Defendants argued that..." "Plaintiff submitted..." "The court found..."
+YOU MUST NOT narrate accident facts or describe physical conditions as standalone facts — only in the context of "Party X argued that..." or "Party X's expert opined that..."
 
-DO NOT list the documents submitted in a motion. NEVER catalog or enumerate the papers a party filed. NEVER write sentences like "Plaintiff submitted the affirmation (609), the expert affidavit (652), a memorandum of law (799), a response to defendants' statement of facts (625), and exhibits." That is a laundry list and is PROHIBITED.
+DO NOT list documents submitted. NEVER catalog papers a party filed. Go straight to WHAT they argued.
 
-CORRECT PATTERN FOR OPPOSITION/REPLY SECTIONS: Lead with the legal arguments, then weave in expert evidence naturally. Follow this structure:
-"In opposition, plaintiff argued [2-4 sentences summarizing the legal arguments with record cites]. Plaintiff's expert, [expert name and credential], opined that [substance of opinion with record cite]."
-Do NOT front-load a list of papers. Go straight to what the party argued.
-
-SUBHEADINGS: Do NOT put multiple record page ranges in subheadings. A subheading identifies the section, not every document. Write "Plaintiff's Opposition and Cross-Motion to Amend" — NOT "Plaintiff's Opposition to Defendants' Motion and Cross-Motion to Amend (609-632; 652-661; 799-822)." Record page cites belong in the body text, not in headings.
+SUBHEADINGS: Do NOT put record page ranges in subheadings. Cites belong in the body text.
 
 CASE INFORMATION:
 Case: {project.get('case_name', '')}
@@ -681,22 +709,33 @@ Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
 
-MOTION PAPERS AND COURT FILINGS: Provided as structured document blocks for citation tracking.
+MOTION PAPERS AND COURT FILINGS: Provided as structured document blocks for citation tracking. READ EVERY DOCUMENT CAREFULLY. Extract the specific arguments, not just the general topic.
 
-{_build_anti_hallucination_block()}
+{_build_anti_hallucination_block().replace('[CITE NEEDED]', '(record page number)').replace('[FULL CITE NEEDED]', '(record page number)').replace('[CASE CITE NEEDED]', '(case citation from source documents)')}
 
-{_build_drafting_protocol()}
+{_build_drafting_protocol().replace('[CITE NEEDED]', '(record page number)').replace('[FULL CITE NEEDED]', '(record page number)').replace('[CASE CITE NEEDED]', '(case citation from source documents)')}
 
-{_build_writing_style()}
+{_build_writing_style().replace('[CITE NEEDED]', '(record page number)').replace('[FULL CITE NEEDED]', '(record page number)').replace('[CASE CITE NEEDED]', '(case citation from source documents)')}
 
 {task}
 
-CITATION FORMAT: Bare parenthetical record page numbers only — (19) or (652) or (979-993). No "R." prefix. No "at p." Preserve exact page numbers from source documents.
+RECORD CITATION FORMAT: Bare parenthetical record page numbers only — (19) or (652) or (979-993). No "R." prefix. No "at p." Preserve exact page numbers from source documents.
 
-FORMATTING: Output PLAIN TEXT ONLY. NO markdown (no ##, no **, no *). Section headings in ALL CAPS on their own line. Subheadings on their own line. Tab-indent body paragraphs. Case names with _underscores_.
+CASE LAW CITATION FORMAT — NEW YORK OFFICIAL:
+- NO periods in reporters: AD2d, AD3d, NY2d, NY3d, Misc 2d, Misc 3d — NEVER A.D.2d or N.Y.2d
+- BRACKETS for court/year, NOT parentheses: [1st Dept. 2002] — NEVER (1st Dept 2002)
+- "Dept." takes a period: [1st Dept. 2002], [2d Dept. 2020]
+- CORRECT: _Alloway v. 715 Riverside_, 298 AD2d 148 [1st Dept. 2002]
+- WRONG: Alloway v. 715 Riverside, 298 A.D.2d 148 (1st Dept 2002)
+
+NEVER output [CITE NEEDED] or [FULL CITE NEEDED] or any bracketed placeholder. This is ABSOLUTELY PROHIBITED. Transitional and structural sentences (e.g., "Defendants advanced two arguments in support of their motion") do NOT need citations — just write them without a cite. Substantive factual assertions about what a party argued or what the court found MUST have a record page cite from the source documents. You have all the source documents — there is no reason for any placeholder.
+
+FORMATTING: Output PLAIN TEXT ONLY. NO markdown (no ##, no **, no *, no bold). Section headings and subheadings in ALL CAPS on their own line. Tab-indent body paragraphs. Case names with _underscores_.
+
+LENGTH: This section should be LONG and THOROUGH — at least 2,000 words. Do not summarize or abbreviate. Cover every argument made by every party on every motion.
 
 {_build_party_label_constraint(project)}
-Draft the Procedural History now. Remember: this is about the PAPERS and the PROCEEDINGS, not about the accident or the building."""
+Draft the Procedural History now. Be EXHAUSTIVE. Cover every motion, every argument, every opposition, every reply, and every ruling in detail."""
     else:
         drafting_protocol = '' if section_type in ('facts', 'experts', 'intro') else _build_drafting_protocol()
         writing_style = _build_writing_style()
@@ -740,7 +779,7 @@ Draft the section now:"""
     elif section_type in ('facts', 'experts'):
         max_tok = 32000
     elif section_type == 'procedural_history':
-        max_tok = 10000
+        max_tok = 32000
     elif section_type == 'argument':
         max_tok = 8000
     else:
@@ -758,7 +797,7 @@ Draft the section now:"""
     # For facts/experts: embed documents inline so Claude reads page markers directly.
     # The Citations API (call_claude_with_docs) is counterproductive here — we need
     # Claude to find "--- PAGE XXXX ---" markers and cite those page numbers.
-    if section_type in ('facts', 'experts', 'intro') and section_docs:
+    if section_type in ('facts', 'experts', 'intro', 'procedural_history') and section_docs:
         inline_docs = "\n\n".join(f"=== {d['title']} ===\n{d['text']}" for d in section_docs)
         full_prompt = f"{prompt}\n\n{inline_docs}"
         print(f"[DRAFT] Using inline docs for {section_type}, full_prompt_len={len(full_prompt):,}", flush=True)
@@ -770,9 +809,12 @@ Draft the section now:"""
     else:
         result = call_claude(prompt, max_tokens=max_tok, model=model)
 
-    # Strip attorney names from procedural history output
+    # Strip attorney names and citation placeholders from procedural history output
     if section_type == 'procedural_history':
         result = _strip_attorney_names(result)
+        result = re.sub(r'\s*\[CITE NEEDED\]', '', result)
+        result = re.sub(r'\s*\[FULL CITE NEEDED\]', '', result)
+        result = re.sub(r'\s*\[CASE CITE NEEDED\]', '', result)
 
     # Replace party surname with party label (e.g., "Batchilly" -> "plaintiff")
     result = _replace_party_surname(result, project)
@@ -786,16 +828,18 @@ Draft the section now:"""
         result = re.sub(r'\s*\[(?:CITE|FULL CITE|CASE CITE) NEEDED\]\.?', '.', result)
         result = re.sub(r'\.\.', '.', result)
 
-    # Skip for argument/custom/facts/experts/intro — these cite per-fact not per-paragraph
-    if section_type not in ('argument', 'custom', 'facts', 'experts', 'intro'):
+    # Skip for argument/custom/facts/experts/intro/procedural_history — these cite per-fact not per-paragraph
+    if section_type not in ('argument', 'custom', 'facts', 'experts', 'intro', 'procedural_history'):
         result = enforce_paragraph_cites(result)
 
-    # Insert full case citations from uploaded legal research
-    result = enforce_case_cites(result, research_text)
+    # Insert full case citations from uploaded legal research (skip procedural history)
+    if section_type != 'procedural_history':
+        result = enforce_case_cites(result, research_text)
 
-    # Citation validation — checks case names AND reporter numbers against sources
-    source_texts = [text for label, text in fitted if text]
-    result = validate_citations(result, *source_texts)
+    # Citation validation — checks case names AND reporter numbers against sources (skip procedural history)
+    if section_type != 'procedural_history':
+        source_texts = [text for label, text in fitted if text]
+        result = validate_citations(result, *source_texts)
 
     # Strip all validation artifacts from argument sections
     if section_type in ('argument', 'custom'):
@@ -1007,6 +1051,152 @@ def revise_brief(project_id):
 
     return jsonify({
         'revised_brief': revised_text,
+        'revision_count': fresh_project.get('revision_count', 1),
+        'metrics': {
+            'pre': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
+            'post': {k: v if not isinstance(v, list) else len(v) for k, v in post_metrics.items()},
+        }
+    })
+
+
+@app.route('/project/<project_id>/supplement', methods=['POST'])
+def supplement_brief(project_id):
+    """Supplement an existing brief with new transcript summary evidence."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    sections = project.get('drafted_sections', {})
+    if 'full_brief' not in sections or not sections['full_brief'].get('content'):
+        return jsonify({'error': 'No draft to supplement. Draft the brief first.'}), 400
+
+    data = request.json or {}
+    supplement_doc_keys = data.get('supplement_doc_keys', [])
+    if not supplement_doc_keys:
+        return jsonify({'error': 'No transcript summaries selected for supplementation.'}), 400
+
+    existing_brief = sections['full_brief']['content']
+    brief_type = project.get('brief_type', 'reply')
+    docs = project.get('documents', {})
+
+    # Validate that all requested docs exist
+    summary_docs = []
+    for key in supplement_doc_keys:
+        doc = docs.get(key)
+        if not doc or not doc.get('text'):
+            return jsonify({'error': f'Document "{key}" not found or has no text.'}), 400
+        summary_docs.append((doc.get('filename', key), doc['text']))
+
+    # Build party context
+    appellant_name = project.get('appellant', 'Appellant')
+    respondent_name = project.get('respondent', 'Respondent')
+    if brief_type == 'appellant':
+        party_context = f"You are writing FOR {appellant_name} (the appellant) AGAINST {respondent_name} (the respondent). Every argument must advocate for the appellant's position."
+    elif brief_type == 'respondent':
+        party_context = f"You are writing FOR {respondent_name} (the respondent) AGAINST {appellant_name} (the appellant). Every argument must advocate for the respondent's position and defend the lower court/agency decision."
+    else:  # reply
+        party_context = f"You are writing FOR {appellant_name} (the appellant) AGAINST {respondent_name} (the respondent). This is a reply brief responding to the respondent's arguments."
+
+    # Opening brief constraints for reply briefs
+    supp_constraints = ''
+    if brief_type == 'reply':
+        full_opening = docs.get('opening_brief', {}).get('text', '')
+        if full_opening:
+            supp_constraints = _preprocess_opening_brief(full_opening)
+
+    prompt = build_supplement_prompt(party_context, supp_constraints)
+    # Append exemplars
+    prompt = prompt.replace(
+        "OUTPUT THE COMPLETE SUPPLEMENTED BRIEF. No commentary. PLAIN TEXT ONLY — NO MARKDOWN:",
+        f"{_build_exemplars(brief_type)}\n\nOUTPUT THE COMPLETE SUPPLEMENTED BRIEF. No commentary. PLAIN TEXT ONLY — NO MARKDOWN:"
+    )
+
+    # Pre-supplement metrics
+    pre_metrics = count_brief_metrics(existing_brief)
+    print(f"[SUPPLEMENT] Pre-metrics: {pre_metrics['words']} words, {pre_metrics['record_cites']} record cites, "
+          f"{pre_metrics['case_cites']} case cites, {pre_metrics['quotes']} quotes, "
+          f"Points: {pre_metrics['points']}", flush=True)
+    print(f"[SUPPLEMENT] Adding {len(summary_docs)} summary doc(s): {[name for name, _ in summary_docs]}", flush=True)
+
+    # Build API docs: existing brief + summaries only (no record volumes)
+    supp_docs = [{"text": existing_brief, "title": "Existing Brief"}]
+    for name, text in summary_docs:
+        supp_docs.append({"text": text, "title": f"Transcript Summary: {name}"})
+
+    # More headroom than revise — supplement adds content
+    estimated_tokens = max(16000, int(len(existing_brief) / 3.0))
+    model = data.get('model', 'sonnet')
+
+    supplemented_text, supp_citations = call_claude_with_docs(prompt, supp_docs, max_tokens=estimated_tokens, model=model)
+    print(f"[CITATIONS] supplement_brief returned {len(supp_citations)} source citations", flush=True)
+
+    # Post-processing: bold to underscore case names
+    supplemented_text = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', supplemented_text)
+
+    # Citation validation
+    source_texts_for_validation = [text for _, text in summary_docs]
+    source_texts_for_validation.append(existing_brief)
+    supplemented_text = validate_citations(supplemented_text, *source_texts_for_validation)
+
+    # Post-supplement validation
+    post_metrics = count_brief_metrics(supplemented_text)
+    print(f"[SUPPLEMENT] Post-metrics: {post_metrics['words']} words, {post_metrics['record_cites']} record cites, "
+          f"{post_metrics['case_cites']} case cites, {post_metrics['quotes']} quotes, "
+          f"Points: {post_metrics['points']}", flush=True)
+
+    violations = validate_supplement_integrity(pre_metrics, post_metrics)
+
+    # Refusal detection
+    refusal_phrases = ['i cannot', 'i apologize', 'i\'m unable', 'please clarify', 'i must maintain']
+    lower_supp = supplemented_text[:500].lower()
+    for phrase in refusal_phrases:
+        if phrase in lower_supp:
+            violations.append(f"AI refused to supplement (detected: '{phrase}')")
+            break
+
+    if violations:
+        print(f"[SUPPLEMENT] REJECTED -- {len(violations)} violations: {violations}", flush=True)
+        return jsonify({
+            'error': 'Supplement rejected -- content loss detected. Your original brief is preserved.',
+            'violations': violations,
+            'pre_metrics': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
+            'post_metrics': {k: v if not isinstance(v, list) else len(v) for k, v in post_metrics.items()},
+        }), 422
+
+    # Calculate deltas
+    words_added = post_metrics['words'] - pre_metrics['words']
+    cites_added = post_metrics['record_cites'] - pre_metrics['record_cites']
+
+    # Save supplemented brief
+    fresh_project = get_project(project_id)
+    if 'drafted_sections' not in fresh_project:
+        fresh_project['drafted_sections'] = {}
+    if 'revision_count' not in fresh_project:
+        fresh_project['revision_count'] = 0
+    if 'revision_history' not in fresh_project:
+        fresh_project['revision_history'] = []
+
+    fresh_project['drafted_sections']['full_brief'] = {
+        'content': supplemented_text,
+        'drafted_at': datetime.now().isoformat()
+    }
+    fresh_project['revision_count'] = fresh_project['revision_count'] + 1
+    fresh_project['revision_history'].append({
+        'instructions': f"[SUPPLEMENT] Added evidence from: {', '.join(name for name, _ in summary_docs)}",
+        'timestamp': datetime.now().isoformat(),
+        'previous_brief': existing_brief,
+        'type': 'supplement',
+    })
+    if len(fresh_project['revision_history']) > 20:
+        fresh_project['revision_history'] = fresh_project['revision_history'][-20:]
+    save_project(project_id, fresh_project)
+
+    print(f"[SUPPLEMENT] Success: +{words_added} words, +{cites_added} citations", flush=True)
+
+    return jsonify({
+        'supplemented_brief': supplemented_text,
+        'words_added': words_added,
+        'cites_added': cites_added,
         'revision_count': fresh_project.get('revision_count', 1),
         'metrics': {
             'pre': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
