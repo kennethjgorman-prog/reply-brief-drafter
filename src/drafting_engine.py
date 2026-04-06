@@ -7,7 +7,7 @@ import re
 from src.config import MAX_PRIMARY_CHARS, MAX_SECONDARY_CHARS, MAX_TOTAL_CHARS
 from src.text_processing import _strip_opposing_brief_chrome, _truncate, _fit_documents, _extract_search_terms, _search_record_pages
 from src.claude_client import call_claude, call_claude_with_docs
-from src.guardrails import validate_citations, enforce_paragraph_cites, enforce_case_cites, guardrail_brief
+from src.guardrails import validate_citations, enforce_paragraph_cites, enforce_case_cites, guardrail_brief, editorial_review_pass, generate_irac_analysis, verify_factual_fidelity, enforce_style_conformance
 from src.prompt_builders import (
     _build_drafting_protocol, _build_anti_hallucination_block,
     _build_writing_style, _build_exemplars, _build_structure_prompt,
@@ -66,6 +66,15 @@ def _draft_appellant_brief_structured(project, docs, structure, drafting_instruc
     fitted = _fit_documents(doc_items)
     doc_context = "\n\n".join(f"=== {label} ===\n{text}" for label, text in fitted if text)
 
+    # IRAC analysis pass: structured legal reasoning for each Point
+    irac_block = generate_irac_analysis(
+        structure.get('points', []),
+        case_law=research_text,
+        record_evidence=doc_context[:80000],
+        doc_type="appellant's brief",
+        model=model
+    )
+
     prompt = f"""You are an expert appellate attorney {"completing" if existing_draft else "drafting"} an APPELLANT'S BRIEF arguing for reversal of the lower court decision.
 
 CASE INFORMATION:
@@ -75,7 +84,11 @@ Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
 
+{atty_instructions}
+
 {structure_block}
+
+{irac_block}
 
 {existing_draft_section}=== SOURCE DOCUMENTS (for finding exact quotes and record cites) ===
 {doc_context}
@@ -101,13 +114,18 @@ Respondent: {project.get('respondent', '')}
 
 {_build_exemplars('appellant')}
 
-{atty_instructions}
-
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(prompt, max_tokens=16000, model=model)
     all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
     final_brief = guardrail_brief(final_brief, 'appellant', research_text, all_source_text=all_source_text, project=project)
+
+    # Editorial review: catch repetitive Points, overlapping arguments
+    final_brief = editorial_review_pass(final_brief, doc_type="appellant's brief", model=model)
+    final_brief = enforce_style_conformance(final_brief)
+
+    # Factual fidelity verification: compare draft against source documents
+    final_brief = verify_factual_fidelity(final_brief, project, model=model)
 
     # Run QC report
     qc = BriefQC()
@@ -163,6 +181,15 @@ def _draft_respondent_brief_structured(project, docs, structure, drafting_instru
     fitted = _fit_documents(doc_items)
     doc_context = "\n\n".join(f"=== {label} ===\n{text}" for label, text in fitted if text)
 
+    # IRAC analysis pass: structured legal reasoning for each Point
+    irac_block = generate_irac_analysis(
+        structure.get('points', []),
+        case_law=research_text,
+        record_evidence=doc_context[:80000],
+        doc_type="respondent's brief",
+        model=model
+    )
+
     prompt = f"""You are an expert appellate attorney {"completing" if existing_draft else "drafting"} a RESPONDENT'S BRIEF defending the lower court decision.
 
 CASE INFORMATION:
@@ -172,7 +199,11 @@ Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
 
+{atty_instructions}
+
 {structure_block}
+
+{irac_block}
 
 {existing_draft_section}=== SOURCE DOCUMENTS (for finding exact quotes and record cites) ===
 {doc_context}
@@ -198,13 +229,18 @@ Respondent: {project.get('respondent', '')}
 
 {_build_exemplars('respondent')}
 
-{atty_instructions}
-
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(prompt, max_tokens=16000, model=model)
     all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
     final_brief = guardrail_brief(final_brief, 'respondent', research_text, all_source_text=all_source_text, project=project)
+
+    # Editorial review: catch repetitive Points, overlapping arguments
+    final_brief = editorial_review_pass(final_brief, doc_type="respondent's brief", model=model)
+    final_brief = enforce_style_conformance(final_brief)
+
+    # Factual fidelity verification: compare draft against source documents
+    final_brief = verify_factual_fidelity(final_brief, project, model=model)
 
     # Run QC report
     qc = BriefQC()
@@ -270,6 +306,15 @@ def _draft_reply_brief_structured(project, docs, structure, drafting_instruction
 
     witness_constraint = _build_witness_constraint_for_project(project)
 
+    # IRAC analysis pass: structured legal reasoning for each Point
+    irac_block = generate_irac_analysis(
+        structure.get('points', []),
+        case_law=research_text,
+        record_evidence=doc_context[:80000],
+        doc_type="reply brief",
+        model=model
+    )
+
     prompt = f"""You are an expert appellate attorney {"completing" if existing_draft else "drafting"} a REPLY BRIEF FOR APPELLANTS.
 
 CRITICAL — YOU ARE WRITING FOR THE APPELLANTS (THE PARTY THAT LOST BELOW).
@@ -288,9 +333,13 @@ Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
 
+{atty_instructions}
+
 {witness_constraint}
 
 {structure_block}
+
+{irac_block}
 
 {existing_draft_section}=== SOURCE DOCUMENTS (for finding exact quotes and record cites) ===
 {doc_context}
@@ -321,14 +370,19 @@ Respondent: {project.get('respondent', '')}
 
 {_build_exemplars('reply')}
 
-{atty_instructions}
-
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(prompt, max_tokens=16000, model=model)
     all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
     respondent_text = '\n\n'.join(text for _, text, _ in _gather_respondent_briefs(docs, sanitize=False))
     final_brief = guardrail_brief(final_brief, 'reply', research_text, opening_brief_text=full_opening_text, all_source_text=all_source_text, respondent_text=respondent_text, project=project)
+
+    # Editorial review: catch repetitive Points, overlapping arguments
+    final_brief = editorial_review_pass(final_brief, doc_type="reply brief", model=model)
+    final_brief = enforce_style_conformance(final_brief)
+
+    # Factual fidelity verification: compare draft against source documents
+    final_brief = verify_factual_fidelity(final_brief, project, model=model)
 
     # Verify witness attribution framing
     if project.get('witness_map'):
@@ -457,6 +511,8 @@ Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
 
+{atty_instructions}
+
 {existing_draft_section}=== LOWER COURT REASONING (extracted) ===
 {court_reasoning}
 
@@ -523,8 +579,6 @@ Respondent: {project.get('respondent', '')}
 
 {_build_exemplars('appellant')}
 
-{atty_instructions}
-
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(pass4_prompt, max_tokens=16000, model=model)
@@ -532,14 +586,15 @@ Respondent: {project.get('respondent', '')}
     # Convert any bold case names to underscore format
     final_brief = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', final_brief)
 
-    # Citation validation — checks case names AND reporter numbers against sources
-    final_brief = validate_citations(
-        final_brief,
-        decision_text,
-        existing_draft,
-        research_text,
-        case_law,
-    )
+    # Citation validation DISABLED — caused false positives on cases from opposing papers
+    # final_brief = validate_citations(final_brief, decision_text, existing_draft, research_text, case_law)
+
+    # Editorial review: catch repetitive Points, overlapping arguments
+    final_brief = editorial_review_pass(final_brief, doc_type="appellant's brief", model=model)
+    final_brief = enforce_style_conformance(final_brief)
+
+    # Factual fidelity verification: compare draft against source documents
+    final_brief = verify_factual_fidelity(final_brief, project, model=model)
 
     return final_brief, {
         'court_reasoning': court_reasoning,
@@ -667,6 +722,8 @@ Docket: {project.get('docket_number', '')}
 Appellant: {project.get('appellant', '')}
 Respondent: {project.get('respondent', '')}
 
+{atty_instructions}
+
 {existing_draft_section}=== CASES FROM APPELLANT'S BRIEF ===
 {appellant_cases}
 
@@ -748,8 +805,6 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
 
 {_build_exemplars('respondent')}
 
-{atty_instructions}
-
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     final_brief = call_claude(pass4_prompt, max_tokens=16000, model=model)
@@ -757,16 +812,15 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
     # Convert any bold case names to underscore format
     final_brief = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', final_brief)
 
-    # Citation validation — checks case names AND reporter numbers against sources
-    final_brief = validate_citations(
-        final_brief,
-        appellant_text,
-        existing_draft,
-        decision_text,
-        research_text,
-        appellant_cases,
-        respondent_cases,
-    )
+    # Citation validation DISABLED — caused false positives on cases from opposing papers
+    # final_brief = validate_citations(final_brief, appellant_text, existing_draft, decision_text, research_text, appellant_cases, respondent_cases)
+
+    # Editorial review: catch repetitive Points, overlapping arguments
+    final_brief = editorial_review_pass(final_brief, doc_type="respondent's brief", model=model)
+    final_brief = enforce_style_conformance(final_brief)
+
+    # Factual fidelity verification: compare draft against source documents
+    final_brief = verify_factual_fidelity(final_brief, project, model=model)
 
     return final_brief, {
         'appellant_cases': appellant_cases,
@@ -863,7 +917,7 @@ These instructions take priority over general drafting guidance. Follow them clo
 
     # Build record index block if available
     record_index = project.get('record_index', [])
-    record_index_block = _format_record_index_for_prompt(record_index) if record_index else ''
+    record_index_block = _format_record_index_for_prompt(record_index, representing=project.get('representing', 'appellant')) if record_index else ''
 
     # Build witness constraint if witness map exists
     witness_constraint = _build_witness_constraint_for_project(project)
@@ -889,6 +943,8 @@ EXISTING DRAFT:
         drafting_task = "Complete and polish the attorney's existing draft. Preserve their voice and arguments while completing unfinished sections and strengthening weak points."
 
     pass5_prompt = f"""You are an expert appellate attorney {"completing" if existing_draft else "drafting"} a REPLY BRIEF FOR APPELLANTS.
+
+{atty_instructions}
 
 {opening_brief_constraints}
 
@@ -1016,8 +1072,6 @@ CRITICAL - CITATION FORMAT REMINDERS:
    - Blank line between paragraphs and before/after headings
    - Case names: _underscores_ only, NEVER **asterisks**
 
-{atty_instructions}
-
 {drafting_task} OUTPUT PLAIN TEXT ONLY — NO MARKDOWN:"""
 
     # Build source document blocks for citation tracking
@@ -1042,6 +1096,13 @@ CRITICAL - CITATION FORMAT REMINDERS:
     all_source_text = '\n\n'.join(doc['text'] for doc in docs.values() if isinstance(doc, dict) and doc.get('text'))
     respondent_text = respondent_text_raw  # unsanitized for characterization verification
     final_brief = guardrail_brief(final_brief, 'reply', research_text, opening_brief_text=full_opening_text, all_source_text=all_source_text, respondent_text=respondent_text, project=project)
+
+    # Editorial review: catch repetitive Points, overlapping arguments
+    final_brief = editorial_review_pass(final_brief, doc_type="reply brief", model=model)
+    final_brief = enforce_style_conformance(final_brief)
+
+    # Factual fidelity verification: compare draft against source documents
+    final_brief = verify_factual_fidelity(final_brief, project, model=model)
 
     # Run QC report
     qc = BriefQC()

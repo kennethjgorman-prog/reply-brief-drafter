@@ -129,26 +129,170 @@ RECORD CHUNK (Pages {chunk['range']}):
             seen.add(key)
             unique.append(fact)
 
+    # Tag affirmation/affidavit entries with source_party using page content
+    _tag_source_parties(unique, pages)
+
     if progress_callback:
         progress_callback('complete', total_chunks, total_chunks, f'Done: {len(unique)} facts indexed')
 
     return unique
 
 
-def _format_record_index_for_prompt(record_index):
-    """Format the record index as a text block for the drafting prompt."""
+def _tag_source_parties(facts, pages):
+    """Tag affirmation/affidavit entries with source_party: 'plaintiff' or 'defendant'.
+
+    Uses page header text to detect which side filed the document.
+    Only tags doc_type == 'affirmation'. Everything else (testimony, exhibit,
+    decision) is neutral and gets no party tag.
+
+    Detection strategy: scan the first page of each affirmation document for
+    party indicators in the header/title text. The record typically has headers
+    like:
+      "Affirmation of Sheldon E. Green, for Plaintiff, in Opposition"
+      "Affirmation of Jonathan R. Janofsky, for Doyban, in Support of Motion"
+      "Exhibit A to Green Affirmation" (plaintiff's expert)
+      "Exhibit A to Borbet Affirmation" (defendant's expert)
+      "Reply Affirmation" (always defendant in opposition context)
+    """
+    # Build page_num -> content lookup
+    page_content = {pg: txt for pg, txt in pages}
+
+    # Defendant indicators checked FIRST (higher priority — "reply affirmation"
+    # and "in support of motion" are unambiguous defendant markers)
+    defendant_patterns = [
+        r'reply\s+affirmation',
+        r'in support of\s+(?:the\s+)?(?:instant\s+)?motion',
+        r'in support of\s+(?:the\s+)?(?:motion|summary)',
+        r'in further support of\s+(?:the\s+)?motion',
+        r'for\s+(?:doyban|konig|katz|northwell|defendant)',
+        r'exhibit\s+\w+\s+to\s+(?:janofsky|borbet)\s+affirmation',
+        r'on behalf of\s+(?:the\s+)?(?:moving\s+)?defendant',
+    ]
+    # Plaintiff indicators (case-insensitive)
+    plaintiff_patterns = [
+        r'for plaintiff',
+        r'in opposition',
+        r'plaintiff.s?.+(?:affirmation|affidavit)',
+        r'exhibit\s+\w+\s+to\s+green\s+affirmation',
+    ]
+
+    # Build a cache: for each page, determine party from header context
+    # We scan the page itself and a few pages before it (to catch exhibit pages
+    # that don't repeat the header)
+    party_cache = {}
+
+    def _detect_party_from_text(text):
+        text_lower = text[:600].lower()
+        # Check defendant first — "reply affirmation" and "in support of motion"
+        # are unambiguous and must take priority over mixed-content pages
+        for pat in defendant_patterns:
+            if re.search(pat, text_lower):
+                return 'defendant'
+        for pat in plaintiff_patterns:
+            if re.search(pat, text_lower):
+                return 'plaintiff'
+        return None
+
+    for fact in facts:
+        if fact.get('doc_type') != 'affirmation':
+            continue
+
+        pg = fact.get('record_page')
+        if pg is None:
+            continue
+
+        # Check cache first
+        if pg in party_cache:
+            fact['source_party'] = party_cache[pg]
+            continue
+
+        # Try the page itself
+        content = page_content.get(pg, '')
+        party = _detect_party_from_text(content)
+
+        # If not found, scan up to 5 pages back for the document header
+        if not party:
+            for lookback in range(1, 6):
+                prev_content = page_content.get(pg - lookback, '')
+                if prev_content:
+                    party = _detect_party_from_text(prev_content)
+                    if party:
+                        break
+
+        if party:
+            party_cache[pg] = party
+            fact['source_party'] = party
+        # If not found from page text, leave for propagation pass below
+
+    # Propagation pass: for untagged affirmation pages, inherit the party from
+    # the nearest tagged page before it (same document runs contiguously)
+    aff_pages_sorted = sorted(set(
+        f.get('record_page') for f in facts
+        if f.get('doc_type') == 'affirmation' and f.get('record_page') is not None
+    ))
+
+    # Build ordered list of tagged pages
+    last_party = None
+    for pg in aff_pages_sorted:
+        if pg in party_cache:
+            last_party = party_cache[pg]
+        elif last_party:
+            # Check that this page is close to previous affirmation pages
+            # (within 20 pages — documents don't span more than that typically)
+            prev_tagged = max((p for p in party_cache if p < pg), default=None)
+            if prev_tagged and (pg - prev_tagged) <= 20:
+                party_cache[pg] = last_party
+
+    # Apply propagated tags
+    for fact in facts:
+        if fact.get('doc_type') != 'affirmation':
+            continue
+        pg = fact.get('record_page')
+        if pg and not fact.get('source_party') and pg in party_cache:
+            fact['source_party'] = party_cache[pg]
+
+    # Log summary
+    tagged_p = sum(1 for f in facts if f.get('source_party') == 'plaintiff')
+    tagged_d = sum(1 for f in facts if f.get('source_party') == 'defendant')
+    untagged = sum(1 for f in facts if f.get('doc_type') == 'affirmation' and not f.get('source_party'))
+    print(f"[INDEX] Party tagging: {tagged_p} plaintiff, {tagged_d} defendant, {untagged} untagged affirmation entries", flush=True)
+
+
+def _format_record_index_for_prompt(record_index, representing='appellant'):
+    """Format the record index as text blocks for the drafting prompt.
+
+    Splits affirmation/affidavit entries by party:
+    - Our side's affirmations + all neutral evidence (testimony, exhibits) → main block
+    - Opposing side's affirmations → separate rebuttal-only block
+
+    Args:
+        record_index: list of fact dicts from _build_record_index
+        representing: 'appellant' or 'respondent' — determines which side is "ours"
+    """
     if not record_index:
         return ''
-    lines = []
+
+    # Determine our party label
+    if representing in ('appellant', 'plaintiff'):
+        our_party = 'plaintiff'
+        their_party = 'defendant'
+    else:
+        our_party = 'defendant'
+        their_party = 'plaintiff'
+
+    main_lines = []
+    rebuttal_lines = []
+
     for fact in record_index:
         pg = fact.get('record_page', '?')
         doc_type = fact.get('doc_type', '')
         witness = fact.get('witness', '')
         fact_text = fact.get('fact', '')
         quote = fact.get('quote', '')
+        source_party = fact.get('source_party', '')
 
         if doc_type == 'pleading':
-            continue  # skip pleadings
+            continue
 
         line = f"(PAGE {pg})"
         if witness:
@@ -158,9 +302,23 @@ def _format_record_index_for_prompt(record_index):
         line += f" {fact_text}"
         if quote:
             line += f' — "{quote}"'
-        lines.append(line)
 
-    return "=== RECORD INDEX (USE THESE PAGE NUMBERS) ===\n" + "\n".join(lines)
+        # Route: opposing affirmations go to rebuttal block
+        if doc_type == 'affirmation' and source_party == their_party:
+            rebuttal_lines.append(line)
+        else:
+            main_lines.append(line)
+
+    result = "=== RECORD INDEX (USE THESE PAGE NUMBERS FOR CITATIONS) ===\n"
+    result += "\n".join(main_lines)
+
+    if rebuttal_lines:
+        result += "\n\n=== OPPOSING PARTY'S AFFIRMATIONS (FOR REBUTTAL ONLY) ===\n"
+        result += "USE THESE ONLY when describing what the opposing party argues, NOT as evidence for your client's narrative.\n"
+        result += "Always attribute: \"Defendants' expert argues...\" or \"Defendants contend...\"\n"
+        result += "\n".join(rebuttal_lines)
+
+    return result
 
 
 def _extract_record_evidence(docs):

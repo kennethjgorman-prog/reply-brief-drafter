@@ -20,7 +20,7 @@ from src.config import PROJECTS_DIR, BRIEF_TYPE_CONFIG, ALLOWED_EXTENSIONS, MAX_
 from src.project_io import get_project, save_project, extract_text, allowed_file
 from src.text_processing import _strip_opposing_brief_chrome, _truncate, _fit_documents, _extract_search_terms, _search_record_pages
 from src.claude_client import call_claude, call_claude_with_docs
-from src.guardrails import validate_citations, enforce_paragraph_cites, enforce_case_cites, guardrail_brief, _replace_party_surname, count_brief_metrics, validate_revision_integrity, validate_supplement_integrity
+from src.guardrails import validate_citations, enforce_paragraph_cites, enforce_case_cites, guardrail_brief, _replace_party_surname, count_brief_metrics, validate_revision_integrity, validate_supplement_integrity, enforce_style_conformance, editorial_review_pass, verify_factual_fidelity
 from src.prompt_builders import (
     _build_drafting_protocol, _build_anti_hallucination_block,
     _build_writing_style, _build_exemplars, _build_structure_prompt,
@@ -50,6 +50,7 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24).hex())
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB max upload
 
 # Register blueprints
 app.register_blueprint(hyperlinker_bp)
@@ -854,15 +855,36 @@ Draft the section now:"""
         if cite_needed_count > 0:
             print(f"[WARN] Stripped {cite_needed_count} [CITE NEEDED] tags from {section_type} section", flush=True)
 
+    # Style conformance: strip em dashes, AI filler phrases, fix citation periods
+    result = enforce_style_conformance(result)
+
+    # Factual fidelity verification for fact-heavy sections
+    if section_type in ('facts', 'experts', 'intro', 'procedural_history', 'counterstatement'):
+        result = verify_factual_fidelity(result, project, model=model)
+
     section_key = f"{section_type}_{argument_number}" if section_type == 'argument' else section_type
     # Re-read project from disk to avoid overwriting concurrent changes
     fresh_project = get_project(project_id)
     if 'drafted_sections' not in fresh_project:
         fresh_project['drafted_sections'] = {}
-    fresh_project['drafted_sections'][section_key] = {
-        'content': result,
-        'drafted_at': datetime.now().isoformat()
-    }
+    # Preserve revision history before overwriting
+    existing = fresh_project['drafted_sections'].get(section_key)
+    if existing and existing.get('content'):
+        history = existing.get('revision_history', [])
+        history.append({
+            'content': existing['content'],
+            'drafted_at': existing.get('drafted_at', ''),
+        })
+        fresh_project['drafted_sections'][section_key] = {
+            'content': result,
+            'drafted_at': datetime.now().isoformat(),
+            'revision_history': history,
+        }
+    else:
+        fresh_project['drafted_sections'][section_key] = {
+            'content': result,
+            'drafted_at': datetime.now().isoformat(),
+        }
     save_project(project_id, fresh_project)
 
     return jsonify({
@@ -890,6 +912,22 @@ def draft_entire_brief(project_id):
     docs = project.get('documents', {})
     brief_type = project.get('brief_type', 'reply')
 
+    # Calculate record volume size and warn if truncation will occur
+    record_total_chars = sum(
+        len(doc.get('text', ''))
+        for key, doc in docs.items()
+        if key.startswith('record_vol_') and isinstance(doc, dict)
+    )
+    record_warning = ''
+    if record_total_chars > 300000:
+        pct_accessible = round(300000 / record_total_chars * 100)
+        record_warning = (
+            f"WARNING: Record volumes total {record_total_chars:,} characters but the AI can only access "
+            f"~300,000 characters ({pct_accessible}%). Record citations in the draft may be unreliable. "
+            f"If you uploaded source documents with verified citations, those will be used instead."
+        )
+        print(f"[RECORD TRUNCATION] {record_warning}", flush=True)
+
     if brief_type == 'appellant':
         final_brief, research = _draft_appellant_brief(project, docs, drafting_instructions, model=model)
     elif brief_type == 'respondent':
@@ -909,10 +947,13 @@ def draft_entire_brief(project_id):
     }
     save_project(project_id, fresh_project)
 
-    return jsonify({
+    response = {
         'full_brief': final_brief,
         'research': research
-    })
+    }
+    if record_warning:
+        response['record_warning'] = record_warning
+    return jsonify(response)
 
 
 @app.route('/project/<project_id>/revise', methods=['POST'])
@@ -923,15 +964,38 @@ def revise_brief(project_id):
         return jsonify({'error': 'Project not found'}), 404
 
     sections = project.get('drafted_sections', {})
-    if 'full_brief' not in sections or not sections['full_brief'].get('content'):
+
+    # Assemble existing brief: prefer full_brief, otherwise combine individual sections
+    existing_brief = ''
+    if 'full_brief' in sections and sections['full_brief'].get('content'):
+        existing_brief = sections['full_brief']['content']
+    else:
+        # Combine individual sections in logical order
+        section_order = ['facts', 'procedural_history', 'experts', 'intro']
+        # Add argument sections
+        for i in range(1, 20):
+            section_order.append(f'argument_{i}')
+        section_order.append('conclusion')
+        # Also pick up any custom sections
+        for key in sections:
+            if key not in section_order and key != 'full_brief':
+                section_order.append(key)
+        parts = []
+        for key in section_order:
+            sec = sections.get(key)
+            if sec:
+                content = sec.get('content', '') if isinstance(sec, dict) else sec
+                if content:
+                    parts.append(content)
+        existing_brief = '\n\n'.join(parts)
+
+    if not existing_brief:
         return jsonify({'error': 'No draft to revise. Draft the brief first.'}), 400
 
     data = request.json or {}
     revision_instructions = data.get('revision_instructions', '').strip()
     if not revision_instructions:
         return jsonify({'error': 'Revision instructions are required'}), 400
-
-    existing_brief = sections['full_brief']['content']
     brief_type = project.get('brief_type', 'reply')
     docs = project.get('documents', {})
 
@@ -999,6 +1063,12 @@ def revise_brief(project_id):
     source_texts_for_validation.append(existing_brief)  # also check against the brief being revised
     revised_text = validate_citations(revised_text, *source_texts_for_validation)
 
+    # Editorial review: catch repetitive Points, overlapping arguments
+    revised_text = editorial_review_pass(revised_text, doc_type=f"{brief_type} brief", model=model)
+
+    # Factual fidelity verification: compare revised draft against source documents
+    revised_text = verify_factual_fidelity(revised_text, project, model=model)
+
     # --- Post-revision validation: REJECT if content gutted ---
     post_metrics = count_brief_metrics(revised_text)
     print(f"[REVISION] Post-metrics: {post_metrics['words']} words, {post_metrics['record_cites']} record cites, "
@@ -1015,14 +1085,9 @@ def revise_brief(project_id):
             violations.append(f"AI refused to revise (detected: '{phrase}')")
             break
 
+    # Content-loss guardrail DISABLED — attorney may intentionally condense
     if violations:
-        print(f"[REVISION] REJECTED -- {len(violations)} violations: {violations}", flush=True)
-        return jsonify({
-            'error': 'Revision rejected -- content loss detected. Your original brief is preserved.',
-            'violations': violations,
-            'pre_metrics': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
-            'post_metrics': {k: v if not isinstance(v, list) else len(v) for k, v in post_metrics.items()},
-        }), 422
+        print(f"[REVISION] WARNING (not blocking) -- {len(violations)} violations: {violations}", flush=True)
 
     # --- Validation passed — save revision ---
     # Re-read project from disk to avoid overwriting concurrent changes
@@ -1261,10 +1326,20 @@ def generate_brief(project_id):
 
 @app.route('/project/<project_id>/download')
 def download_brief(project_id):
-    """Download generated brief"""
+    """Download generated brief - always regenerates DOCX from latest project.json content"""
     project = get_project(project_id)
     if not project:
         return "Project not found", 404
+
+    # Always regenerate DOCX from current project.json content before serving
+    sections = project.get('drafted_sections', {})
+    if 'full_brief' in sections and sections['full_brief'].get('content'):
+        try:
+            output_path = generate_brief_docx(project)
+            project['output_file'] = str(output_path)
+            save_project(project_id, project)
+        except Exception as e:
+            print(f"[DOWNLOAD] DOCX regeneration failed, falling back to existing file: {e}", flush=True)
 
     brief_type = project.get('brief_type', 'reply')
     config = BRIEF_TYPE_CONFIG.get(brief_type, BRIEF_TYPE_CONFIG['reply'])

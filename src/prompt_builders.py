@@ -99,6 +99,8 @@ CITATION FORMAT:
   - Case names use UNDERSCORES: _Case Name v. Other Party_
   - Court and year in SQUARE BRACKETS [ ], NEVER parentheses ( )
   - NO PERIODS in reporters: AD3d NOT A.D.3d, NY2d NOT N.Y.2d, NYS2d NOT N.Y.S.2d
+  - NEVER cite to NY Slip Op numbers. ALWAYS use the full official citation (volume, reporter, page, [court year]). If you cited a case in full earlier in the document, repeat the full citation every time you re-cite it.
+  - COURT HIERARCHY: NY2d/NY3d = Court of Appeals (New York's highest court). AD2d/AD3d = Appellate Division. Misc 2d/Misc 3d = Supreme Court (trial level). "This Court" means the Appellate Division ONLY. When citing a Court of Appeals case (NY2d/NY3d), NEVER say "this Court held" — say "the Court of Appeals held" or "as held in."
 
 ================================================================================
 RULE 4: ZERO INFERENCE POLICY
@@ -155,18 +157,44 @@ WHEN IN DOUBT:
 RULE 5: DOCUMENT SOURCE HIERARCHY
 ================================================================================
 
-CATEGORY A \u2014 EVIDENTIARY SOURCES (cite as record facts):
-  - Lower court decision / order
-  - Trial transcript
-  - Record volumes / appendix
-  - Exhibits, affidavits, sworn statements from the record
+CATEGORY A \u2014 PRIMARY EVIDENTIARY SOURCES (cite these for facts):
+  - Medical records, lab results, imaging reports, clinical notes
+  - Expert affirmations / affidavits
+  - Trial transcript / deposition transcript
+  - Exhibits and sworn statements from the record
+  - Contracts, correspondence, and other documentary evidence
 
-CATEGORY B \u2014 ADVOCACY DOCUMENTS (NOT facts \u2014 these are spin):
+CATEGORY B \u2014 SECONDARY SOURCES (use with care):
+  - Lower court decision / order \u2014 cite ONLY for procedural history and the
+    court's own rulings/reasoning. The court decision often SUMMARIZES medical
+    records, expert opinions, and testimony. DO NOT cite the court decision for
+    those underlying facts. Find the ACTUAL medical record, expert affirmation,
+    or transcript page in the record and cite THAT page instead.
+
+CATEGORY C \u2014 ADVOCACY DOCUMENTS (NOT facts \u2014 these are spin):
   - Appellant's brief / opening brief
   - Respondent's brief / answering brief
   - Any party's memorandum of law
 
-RULES FOR CATEGORY B:
+CRITICAL RULE \u2014 CITE THE ORIGINAL SOURCE, NOT A SUMMARY:
+  When the court decision summarizes medical findings, expert opinions, or
+  testimony, you MUST find the ORIGINAL document in the record and cite its
+  page number. The court decision is a SECONDARY source that paraphrases
+  primary evidence. Citing the court decision for medical facts is WRONG
+  because it misrepresents where the information comes from.
+
+  EXAMPLE OF THIS VIOLATION:
+  Court decision (p. 15) says: "Dr. Wolfe's imaging review revealed an avulsed fragment."
+  The actual expert affirmation is at pages 200-210 in the record.
+  \u2717 WRONG: Dr. Wolfe's imaging review revealed an avulsed fragment (15).
+    (You cited the court's SUMMARY, not the actual expert affirmation!)
+  \u2713 RIGHT: Dr. Wolfe's imaging review revealed an avulsed fragment (205).
+    (You found the actual expert affirmation in the record and cited that page.)
+
+  If you CANNOT find the original source in the record, write [CITE NEEDED]
+  rather than citing the court decision's summary.
+
+RULES FOR CATEGORY C:
   a) NEVER cite a record page based on what an opposing brief says is on that page.
      Go to the ACTUAL record page and verify.
   b) NEVER put quotes from an opposing brief and cite a record page as if you found it.
@@ -187,7 +215,34 @@ RULES FOR CATEGORY B:
     actual language separately.)
 
 ================================================================================
-RULE 6: FORMATTING \u2014 PLAIN TEXT ONLY (NO MARKDOWN)
+RULE 6: ATTORNEY'S SOURCE DOCUMENTS DEFINE THE LEGAL STRATEGY
+================================================================================
+
+When the attorney uploads source documents (memoranda of law, statements of facts,
+affirmations, or other work product) with their own record citations:
+
+  a) Those documents ARE the legal strategy. Do NOT deviate from the positions
+     taken in those documents.
+  b) Do NOT concede any point that the attorney argued in the source documents.
+     If the attorney argued plaintiff was not negligent, YOU argue plaintiff was
+     not negligent. You do not get to decide otherwise.
+  c) Do NOT restructure the arguments unless the attorney's instructions
+     specifically ask you to.
+  d) Use the CITATIONS from the source documents. They were compiled by the
+     attorney from the actual record. Do not substitute your own citations.
+  e) Use the CASE LAW from the source documents. Do not introduce cases that
+     do not appear in the source documents.
+  f) If the attorney's instructions say "strictly based on these documents,"
+     that means NOTHING goes in the brief that is not in those documents.
+  g) The lower court decision tells you what happened procedurally. The
+     attorney's source documents tell you what to ARGUE. When they conflict
+     on legal strategy, FOLLOW THE ATTORNEY'S DOCUMENTS.
+
+THIS RULE OVERRIDES ALL OTHER DRAFTING GUIDANCE. The attorney knows the case
+better than you do. Your job is to draft, not to second-guess the strategy.
+
+================================================================================
+RULE 7: FORMATTING \u2014 PLAIN TEXT ONLY (NO MARKDOWN)
 ================================================================================
 
   - NEVER use markdown: NO ## headings, NO **bold**, NO *italics*, NO # anything
@@ -199,6 +254,15 @@ RULE 6: FORMATTING \u2014 PLAIN TEXT ONLY (NO MARKDOWN)
   - Block quotes: Indent with two tabs
   - Blank line between paragraphs and around headings
   - Case names: _underscores_ for underlining (NOT asterisks)
+
+================================================================================
+RULE 8: SIGNATURE BLOCK
+================================================================================
+
+  Do NOT include a signature block in your drafted text. The system generates
+  the signature block automatically from the project settings (attorney name
+  and firm). If the source documents were prepared by a different attorney,
+  do NOT use that attorney's name or firm in your output.
 
 ================================================================================
 SELF-AUDIT \u2014 RUN BEFORE OUTPUTTING
@@ -424,7 +488,11 @@ STRUCTURAL ARGUMENT PATTERNS \u2014 USE THESE TEMPLATES:
 
 2. CREDIBILITY ATTACK: "[Party]'s contention that [X] is unavailing. Indeed, it is well settled that [legal rule] ([pattern jury instruction or treatise], citing, [string cite])."
 
-3. CASE DISTINCTION: "We respectfully submit that [case] is inapplicable. It is uncontested that [factual distinction 1]. Moreover, [factual distinction 2]. It is black letter law that [rule] ([lead case], quoting [source]; [string cite]). Conversely, at bar [application]. Thus, there can be no dispute that [case] is inapplicable."
+3. CASE DISTINCTION (when the case hurts us): "We respectfully submit that [case] is inapplicable. It is uncontested that [factual distinction 1]. Moreover, [factual distinction 2]. It is black letter law that [rule] ([lead case], quoting [source]; [string cite]). Conversely, at bar [application]. Thus, there can be no dispute that [case] is inapplicable."
+
+3a. CASE ADOPTION (when the opponent's case actually supports us): "Indeed, [case], upon which [party] relies, is directly supportive of [our] position. The [case] court held that [quoted holding] ([case] at [page]). Here, [application showing how the holding supports our argument]. Thus, [party]'s own authority compels [result in our favor]."
+
+CRITICAL: Do NOT automatically distinguish every case the opposing party cites. FIRST read the case's actual holding. If the holding SUPPORTS our position, ADOPT the case and use it against the opponent. Only distinguish a case when its holding actually hurts us.
 
 4. FACTUAL DEMOLITION: "[Party] submitted [evidence]. However, [witness] stated that [contradicting fact] ([record cite]). It was uncontested that [devastating fact] ([string cite establishing legal consequence])."
 
@@ -837,6 +905,8 @@ CASE CITATION FORMAT:
 - WRONG: 123 AD3d 456 (2d Dept 2020) — DO NOT USE PARENTHESES for court/year
 - CORRECT: 123 AD3d 456 [2d Dept 2020] — ALWAYS USE BRACKETS for court/year
 - This applies to ALL reporters: AD2d, AD3d, NY2d, NY3d, Misc 2d, Misc 3d
+- NEVER cite to NY Slip Op numbers. ALWAYS use the full official citation (volume, reporter, page, [court year]). When re-citing a case already cited in full earlier in the document, repeat the full official citation.
+- COURT HIERARCHY: NY2d/NY3d = Court of Appeals (highest court). AD2d/AD3d = Appellate Division. "This Court" means the Appellate Division ONLY. When citing NY2d/NY3d cases, say "the Court of Appeals held," NEVER "this Court held."
 
 RECORD CITATIONS - CRITICAL FORMAT:
 - NEVER use "R." prefix - that is WRONG
@@ -869,6 +939,57 @@ FORMATTING - CRITICAL (PLAIN TEXT, NO MARKDOWN):
 {_build_writing_style()}
 
 OUTPUT ONLY THE COMPLETE REVISED BRIEF TEXT. No commentary. PLAIN TEXT ONLY — NO MARKDOWN:"""
+
+
+def build_supplement_prompt(party_context, constraints=''):
+    """Build the full supplement prompt for adding new evidence to an existing brief.
+    The brief is preserved verbatim; only net-new facts from transcript summaries are inserted."""
+    return f"""You are an expert appellate attorney supplementing a brief with newly summarized transcript evidence.
+
+PARTY CONTEXT — CRITICAL:
+{party_context}
+
+{constraints}
+
+=== TASK: SUPPLEMENT BRIEF WITH NEW EVIDENCE ===
+
+You have been given:
+1. The EXISTING BRIEF (complete, already drafted)
+2. One or more TRANSCRIPT SUMMARIES containing new factual material with citations
+
+YOUR JOB: Output the COMPLETE brief with new facts from the summaries inserted at thematically appropriate locations.
+
+SUPPLEMENT RULES — CRITICAL:
+
+1. PRESERVE EVERYTHING VERBATIM — Do NOT rewrite, rephrase, edit, or reorganize any existing sentence in the brief
+2. Do NOT change any existing case citations, record citations, quoted testimony, or Point headings
+3. Do NOT remove any content — the brief can only GROW, never shrink
+4. ONLY ADD facts that are genuinely NOT already stated or implied in the existing brief
+5. Insert each new fact at the most thematically appropriate location within the existing text
+6. New facts MUST include their transcript citations exactly as they appear in the summary (e.g., "(Tr. at 343:11-15)" or "(45)")
+7. Use minimal transitions — do not add excessive "Additionally," / "Moreover," / "Furthermore,"
+8. New sentences should match the voice, tone, and style of the surrounding text
+9. If a summary fact is already covered (same witness, same topic, same conclusion), do NOT add it again
+10. Do NOT add new Point headings or restructure the brief's organization
+
+DEDUPLICATION — IMPORTANT:
+Before inserting a fact, check whether the existing brief already contains:
+- The same factual assertion (even if worded differently)
+- The same citation page/line reference
+- The same witness testimony on the same topic
+If YES to any of these, SKIP that fact — it is not "new."
+
+FORMATTING — PLAIN TEXT ONLY:
+- No markdown (no ##, no **, no *)
+- Case names: _underscores_ only
+- Match the existing brief's formatting (tabs, spacing, paragraph structure)
+- Period AFTER closing parenthesis for citations: "fact (45)." not "fact. (45)"
+
+{_build_anti_hallucination_block()}
+
+{_build_writing_style()}
+
+OUTPUT THE COMPLETE SUPPLEMENTED BRIEF. No commentary. PLAIN TEXT ONLY — NO MARKDOWN:"""
 
 
 def _build_structure_prompt(structure):

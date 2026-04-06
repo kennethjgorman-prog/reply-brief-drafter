@@ -57,6 +57,16 @@ def _clean_text(text):
     return text
 
 
+def _is_short_heading(text):
+    """Short headings like POINT I, PRELIMINARY STATEMENT, CONCLUSION — stay double-spaced centered."""
+    clean = text.strip()
+    return bool(re.match(r'^POINT\s+[IVXLCDM\d]+:?\s*$', clean) or
+                clean in ('PRELIMINARY STATEMENT', 'CONCLUSION', 'ARGUMENT',
+                          'STATEMENT OF THE CASE', 'STATEMENT OF FACTS',
+                          'QUESTIONS PRESENTED', 'DISCUSSION', 'INTRODUCTION',
+                          'COUNTERSTATEMENT OF FACTS'))
+
+
 def _is_heading(text):
     """Detect if a line is a section heading (ALL CAPS, short, no period at end)"""
     stripped = text.strip()
@@ -89,9 +99,9 @@ def _is_heading(text):
     alpha_chars = [c for c in clean if c.isalpha()]
     if len(alpha_chars) > 3:
         upper_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
-        if upper_ratio > 0.85 and len(clean) < 200 and len(clean.split()) >= 4:
-            # Skip if it looks like a party name (contains "v." or corporate suffixes)
-            if not re.search(r'\bv\.\b|\bCorp\b|\bInc\b|\bLLC\b|\bLtd\b', clean):
+        if upper_ratio > 0.85 and len(clean) < 500 and len(clean.split()) >= 4:
+            # Skip if it looks like a party name (corporate suffixes)
+            if not re.search(r'\b(?:Corp|Inc|LLC|Ltd)\b', clean):
                 return True
     return False
 
@@ -169,18 +179,35 @@ def _add_text_with_citations(p, text, nyscef_cfg, is_bold=False):
             _add_run(p, segment, is_bold)
 
 
-def _add_paragraph(doc, text, nyscef_cfg=None, is_bold=False, alignment=None, link_citations=False):
-    """Add a paragraph with Courier New 12pt, double-spaced, with underlined case names"""
+def _add_paragraph(doc, text, nyscef_cfg=None, is_bold=False, alignment=None,
+                    link_citations=False, is_subheading=False, single_spaced=False):
+    """Add a paragraph with Courier New 12pt, formatted per Rosman exemplar specs"""
     text = _clean_text(text)
     p = doc.add_paragraph()
-    p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
-    p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.space_before = Pt(0)
+    if is_subheading:
+        # Subheadings: justified, single-spaced, all lines indented 0.5"
+        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.left_indent = Inches(0.5)
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    elif single_spaced:
+        # Long point headings: centered, single-spaced, first-line indent 0.5"
+        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.first_line_indent = Inches(0.5)
+    else:
+        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.space_before = Pt(0)
     if alignment:
         p.alignment = alignment
     elif not is_bold:
-        # Body paragraphs get 0.5" first-line indent
-        p.paragraph_format.first_line_indent = Inches(0.5)
+        # Body paragraphs: justified with first-line indent
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        if not text.startswith('\t'):
+            p.paragraph_format.first_line_indent = Inches(0.5)
 
     use_links = link_citations and nyscef_cfg
 
@@ -234,25 +261,175 @@ def generate_brief_docx(project):
 
     nyscef_cfg = project.get('nyscef_config')
 
-    def add_para(doc, text, is_bold=False, alignment=None, link_citations=False):
+    def add_para(doc, text, is_bold=False, alignment=None, link_citations=False,
+                 is_subheading=False, single_spaced=False):
         return _add_paragraph(doc, text, nyscef_cfg=nyscef_cfg, is_bold=is_bold,
-                              alignment=alignment, link_citations=link_citations)
+                              alignment=alignment, link_citations=link_citations,
+                              is_subheading=is_subheading, single_spaced=single_spaced)
+
+    def add_spacer(doc):
+        """Add a single-spaced blank paragraph for spacing between headings."""
+        p = doc.add_paragraph()
+        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.space_before = Pt(0)
 
     # --- Build the document ---
 
-    # Title block
-    add_para(doc, config['doc_title'], is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
-    add_para(doc, project.get('case_name', ''), alignment=WD_ALIGN_PARAGRAPH.CENTER)
-    add_para(doc, f"Docket No. {project.get('docket_number', '')}", alignment=WD_ALIGN_PARAGRAPH.CENTER)
+    # Appellate caption block — single-spaced, left-aligned
+    appellant = project.get('appellant', '').strip()
+    respondent = project.get('respondent', '').strip()
+    docket_number = project.get('docket_number', '').strip()
+    brief_type = project.get('brief_type', 'appellant')
+    representing = project.get('representing', 'appellant')
+    attorney_name = project.get('attorney_name', '').strip()
+    attorney_firm = project.get('attorney_firm', '').strip()
+
+    court_name = project.get('court', '').strip()
+    if not court_name or 'appellate' not in court_name.lower():
+        court_name = 'APPELLATE DIVISION, SECOND DEPARTMENT'
+
+    # Determine party designations
+    if representing == 'appellant':
+        appellant_designation = 'Plaintiff-Appellant'
+        respondent_designation = 'Defendants-Respondents'
+    else:
+        appellant_designation = 'Plaintiff-Respondent'
+        respondent_designation = 'Defendants-Appellants'
+
+    # Determine brief title label (short form for caption)
+    brief_title_map = {
+        'appellant': 'BRIEF FOR APPELLANT',
+        'respondent': 'BRIEF FOR RESPONDENT',
+        'reply': 'REPLY BRIEF',
+    }
+    caption_title = brief_title_map.get(brief_type, config['doc_title'])
+
+    def _caption_para(text, bold=False, right_text=None):
+        """Add a single-spaced caption paragraph, left-aligned."""
+        p = doc.add_paragraph()
+        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.space_before = Pt(0)
+        if right_text:
+            # Left text + right-aligned text on same line using tab stop
+            tab_stop = OxmlElement('w:tab')
+            pPr = p._p.get_or_add_pPr()
+            tabs = OxmlElement('w:tabs')
+            tab = OxmlElement('w:tab')
+            tab.set(qn('w:val'), 'right')
+            tab.set(qn('w:pos'), '9360')  # right margin at 6.5"
+            tabs.append(tab)
+            pPr.append(tabs)
+            run = p.add_run(text)
+            run.font.name = 'Courier New'
+            run.font.size = Pt(12)
+            run.bold = bold
+            run2 = p.add_run('\t')
+            run2.font.name = 'Courier New'
+            run2.font.size = Pt(12)
+            run3 = p.add_run(right_text)
+            run3.font.name = 'Courier New'
+            run3.font.size = Pt(12)
+            run3.bold = True
+        else:
+            run = p.add_run(text)
+            run.font.name = 'Courier New'
+            run.font.size = Pt(12)
+            run.bold = bold
+        return p
+
+    # Court heading — NY appellate courts need full two-line header
+    upper_court = court_name.upper()
+    if 'APPELLATE DIVISION' in upper_court:
+        _caption_para('SUPREME COURT OF THE STATE OF NEW YORK', bold=True)
+        _caption_para(upper_court, bold=True)
+    else:
+        _caption_para(upper_court, bold=True)
+
+    # Dashed line
+    _caption_para('--------------------------------------X')
+
+    # Appellant name with brief title right-aligned
+    _caption_para(appellant.upper(), right_text=caption_title)
+
+    # Party designation indented
+    _caption_para(f'\t{appellant_designation}')
+
+    # -against-
+    _caption_para('')
+    _caption_para('\t-against-')
+    _caption_para('')
+
+    # Respondent name
+    _caption_para(respondent.upper() + ',')
+
+    # Respondent designation indented
+    _caption_para(f'\t{respondent_designation}')
+
+    # Check if case_name has additional parties (e.g., "and THE COUNTY OF NASSAU")
+    case_name = project.get('case_name', '')
+    # Look for parties after the respondent
+    resp_upper = respondent.upper()
+    if resp_upper in case_name.upper():
+        remainder = case_name.upper()[case_name.upper().index(resp_upper) + len(resp_upper):].strip()
+        if remainder.startswith('AND '):
+            additional_party = remainder[4:].strip()
+            _caption_para('')
+            _caption_para('\t-and-')
+            _caption_para('')
+            _caption_para(additional_party)
+            _caption_para('\tDefendant')
+
+    # Closing dashed line
+    _caption_para('--------------------------------------X')
+
+    # Blank line to transition to double-spaced body
     add_para(doc, "")
 
     # Add drafted sections
     sections = project.get('drafted_sections', {})
 
+    def _strip_ai_caption(text):
+        """Strip AI-generated caption/title block from the top of drafted content.
+        The AI often generates its own court heading, party block, and brief title
+        which duplicates the DOCX generator's caption."""
+        lines = text.split('\n')
+        # Find where the actual brief content starts (PRELIMINARY STATEMENT, POINT I, etc.)
+        caption_keywords = [
+            'SUPREME COURT', 'APPELLATE DIVISION', 'Plaintiff-Appellant',
+            'Plaintiff-Respondent', 'Defendants-Respondents', 'Defendants-Appellants',
+            '-against-', 'REPLY BRIEF FOR', 'BRIEF FOR APPELLANT',
+            'BRIEF FOR RESPONDENT', 'BRIEF FOR PLAINTIFF', 'Docket No.',
+            'Index No.',
+        ]
+        content_starts = [
+            'PRELIMINARY STATEMENT', 'INTRODUCTION', 'STATEMENT OF THE CASE',
+            'STATEMENT OF FACTS', 'POINT I', 'QUESTIONS PRESENTED',
+            'TABLE OF CONTENTS', 'TABLE OF AUTHORITIES',
+        ]
+        first_content_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip().upper()
+            for cs in content_starts:
+                if stripped.startswith(cs):
+                    first_content_idx = i
+                    break
+            if first_content_idx is not None:
+                break
+
+        if first_content_idx and first_content_idx > 0:
+            # Check if the lines before first_content_idx look like a caption
+            pre_lines = '\n'.join(lines[:first_content_idx]).upper()
+            is_caption = any(kw.upper() in pre_lines for kw in caption_keywords)
+            if is_caption:
+                return '\n'.join(lines[first_content_idx:])
+        return text
+
     # Prefer individual argument sections over full_brief when argument sections exist
     has_individual_args = any(k.startswith('argument_') for k in sections)
     if 'full_brief' in sections and not has_individual_args:
-        content = sections['full_brief'].get('content', '')
+        content = _strip_ai_caption(sections['full_brief'].get('content', ''))
         # Strip validation artifacts
         content = re.sub(r'\s*\[CITE NEEDED\]\.?', '.', content)
         content = re.sub(r'\s*\[CASE CITE NEEDED\]\.?', '.', content)
@@ -261,16 +438,28 @@ def generate_brief_docx(project):
         content = re.sub(r'\s*\[CITE NUMBER UNVERIFIED\]\.?', '', content)
         content = re.sub(r'\s*\[VERIFY\]\.?', '.', content)
         content = re.sub(r'\.\.', '.', content)
+
+        prev_type = None
         for line in content.split('\n'):
             stripped = line.strip()
             if not stripped:
                 continue
             elif _is_heading(line):
-                add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                if _is_short_heading(stripped):
+                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    add_spacer(doc)
+                else:
+                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
+                    add_spacer(doc)
+                prev_type = 'heading'
             elif _is_subheading(line):
-                add_para(doc, line, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, link_citations=True)
+                add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
+                add_spacer(doc)
+                prev_type = 'subheading'
             else:
                 add_para(doc, line, link_citations=True)
+                prev_type = 'body'
+
     else:
         if 'facts' in sections:
             for line in sections['facts'].get('content', '').split('\n'):
@@ -278,7 +467,12 @@ def generate_brief_docx(project):
                 if not stripped:
                     continue
                 elif _is_heading(line):
-                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    if _is_short_heading(stripped):
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    else:
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
+                elif _is_subheading(line):
+                    add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
                 else:
                     add_para(doc, line, link_citations=True)
 
@@ -288,7 +482,12 @@ def generate_brief_docx(project):
                 if not stripped:
                     continue
                 elif _is_heading(line):
-                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    if _is_short_heading(stripped):
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    else:
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
+                elif _is_subheading(line):
+                    add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
                 else:
                     add_para(doc, line, link_citations=True)
 
@@ -299,9 +498,12 @@ def generate_brief_docx(project):
                 if not stripped:
                     continue
                 elif _is_heading(line):
-                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    if _is_short_heading(stripped):
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    else:
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
                 elif _is_subheading(line):
-                    add_para(doc, line, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, link_citations=True)
+                    add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
                 else:
                     add_para(doc, line, link_citations=True)
 
@@ -323,11 +525,15 @@ def generate_brief_docx(project):
                 if not stripped:
                     continue
                 elif _is_heading(line):
-                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    if _is_short_heading(stripped):
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    else:
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
                 elif _is_subheading(line):
-                    add_para(doc, line, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, link_citations=True)
+                    add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
                 else:
                     add_para(doc, line, link_citations=True)
+                    prev_type = 'body'
 
         # Output any custom sections not already handled
         known_keys = {'facts', 'procedural_history', 'intro', 'conclusion', 'full_brief'}
@@ -344,9 +550,12 @@ def generate_brief_docx(project):
                 if not stripped:
                     continue
                 elif _is_heading(line):
-                    add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    if _is_short_heading(stripped):
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                    else:
+                        add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
                 elif _is_subheading(line):
-                    add_para(doc, line, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, link_citations=True)
+                    add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
                 else:
                     add_para(doc, line, link_citations=True)
 
@@ -359,7 +568,7 @@ def generate_brief_docx(project):
                 elif _is_heading(line):
                     add_para(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
                 elif _is_subheading(line):
-                    add_para(doc, line, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, link_citations=True)
+                    add_para(doc, line.strip(), is_bold=True, is_subheading=True, link_citations=True)
                 else:
                     add_para(doc, line, link_citations=True)
 
@@ -407,6 +616,11 @@ def generate_section_docx(project, section_key):
     style = doc.styles['Normal']
     style.font.name = 'Courier New'
     style.font.size = Pt(12)
+    style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+    style.paragraph_format.space_after = Pt(0)
+    style.paragraph_format.space_before = Pt(0)
+
+    nyscef_cfg = project.get('nyscef_config')
 
     # Set 1-inch margins
     for section_obj in doc.sections:
@@ -415,52 +629,20 @@ def generate_section_docx(project, section_key):
         section_obj.left_margin = Inches(1)
         section_obj.right_margin = Inches(1)
 
-    def _section_add_paragraph(doc, text, is_bold=False, alignment=None, is_subheading=False):
-        """Add a formatted paragraph -- mirrors the main brief download formatter."""
-        text = text.replace('\u2014', ',').replace('\u2013', '-')  # em/en dash cleanup
-        p = doc.add_paragraph()
-        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
-        p.paragraph_format.space_after = Pt(0)
-        p.paragraph_format.space_before = Pt(0)
-        if alignment:
-            p.alignment = alignment
-        elif not is_bold and not is_subheading:
-            p.paragraph_format.first_line_indent = Inches(0.5)
-
-        # Split on underscored case names for underlining
-        parts = re.split(r'(_[^_]+_)', text)
-        for part in parts:
-            if part.startswith('_') and part.endswith('_') and len(part) > 2:
-                run = p.add_run(part[1:-1])
-                run.font.name = 'Courier New'
-                run.font.size = Pt(12)
-                run.underline = True
-                if is_bold or is_subheading:
-                    run.bold = True
-            else:
-                run = p.add_run(part)
-                run.font.name = 'Courier New'
-                run.font.size = Pt(12)
-                if is_bold or is_subheading:
-                    run.bold = True
-
+    # Use the same _add_paragraph as the main generator
     for line in content.split('\n'):
         stripped = line.strip()
         if not stripped:
             continue
-        # ALL CAPS heading -- centered, bold
-        if stripped == stripped.upper() and len(stripped) < 120 and not stripped[0].isdigit():
-            _section_add_paragraph(doc, stripped, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
-        # Subheading -- not all caps, not starting with tab, relatively short, no period at end
-        elif len(stripped) < 150 and not stripped[0] == '\t' and not stripped.endswith('.') and not stripped.startswith('(') and any(c.isupper() for c in stripped[:3]):
-            # Check if it looks like a subheading vs. a short sentence
-            words = stripped.split()
-            if len(words) <= 20 or stripped.endswith(')'):
-                _section_add_paragraph(doc, stripped, is_subheading=True)
+        if _is_heading(line):
+            if _is_short_heading(stripped):
+                _add_paragraph(doc, stripped, nyscef_cfg=nyscef_cfg, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
             else:
-                _section_add_paragraph(doc, stripped)
+                _add_paragraph(doc, stripped, nyscef_cfg=nyscef_cfg, is_bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, single_spaced=True)
+        elif _is_subheading(line):
+            _add_paragraph(doc, stripped, nyscef_cfg=nyscef_cfg, is_bold=True, is_subheading=True, link_citations=True)
         else:
-            _section_add_paragraph(doc, stripped)
+            _add_paragraph(doc, line, nyscef_cfg=nyscef_cfg, link_citations=True)
 
     label = section_key.replace('_', ' ').title()
     case_safe = secure_filename(case_name)

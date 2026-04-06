@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NYSCEF Hyperlinker - Brief Drafter</title>
+    <title>Record Hyperlinker - Brief Drafter</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -253,8 +253,8 @@
     <div class="container">
         <a href="/" class="back-link">&larr; Back to Brief Drafter</a>
         <div class="header">
-            <h1>NYSCEF Hyperlinker</h1>
-            <p>Upload a .docx or .pdf brief and add clickable NYSCEF record citation links</p>
+            <h1>Record Hyperlinker</h1>
+            <p>Upload a .docx or .pdf brief and add clickable record citation hyperlinks</p>
         </div>
 
         <!-- Step 1: Upload -->
@@ -270,8 +270,40 @@
 
         <!-- Step 2: Volume config -->
         <div class="card" id="volumeCard" style="opacity: 0.4; pointer-events: none;">
-            <h2><span class="step-number">2</span>Record Volumes</h2>
-            <p style="color: #888; font-size: 0.9em; margin-bottom: 16px;">
+            <h2><span class="step-number">2</span>Record / Appendix Volumes</h2>
+            <div style="margin-bottom: 16px;">
+                <label style="color: #888; font-size: 0.9em;">Court System</label>
+                <select id="courtSystem" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.08); color: #fff; font-size: 1em; margin-top: 4px;">
+                    <option value="nyscef">NYSCEF (New York State)</option>
+                    <option value="ecf">Federal CM/ECF (Appellate / District)</option>
+                </select>
+            </div>
+            <div style="margin-bottom: 16px;">
+                <label style="color: #888; font-size: 0.9em;">Citation Formats in Your Brief</label>
+                <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 10px 18px;">
+                    <label style="cursor: pointer; font-size: 0.9em; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" class="cite-format" value="bare" checked>
+                        Bare pages <span style="color: #666;">(328)</span>
+                    </label>
+                    <label style="cursor: pointer; font-size: 0.9em; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" class="cite-format" value="r_dot">
+                        R. <span style="color: #666;">(R. 328)</span>
+                    </label>
+                    <label style="cursor: pointer; font-size: 0.9em; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" class="cite-format" value="a_dot">
+                        A. / App. <span style="color: #666;">(A. 328)</span>
+                    </label>
+                    <label style="cursor: pointer; font-size: 0.9em; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" class="cite-format" value="ja_dot">
+                        JA. <span style="color: #666;">(JA. 328)</span>
+                    </label>
+                    <label style="cursor: pointer; font-size: 0.9em; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" class="cite-format" value="sa_dot">
+                        SA. / SPA. <span style="color: #666;">(SPA. 328)</span>
+                    </label>
+                </div>
+            </div>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 16px;" id="volumeInstructions">
                 For each volume: paste the NYSCEF URL and upload the PDF from your local files. Page labels will be read automatically.
             </p>
             <div id="volumeList">
@@ -290,7 +322,7 @@
     </div>
 
     <script>
-        let sessionId = null;
+        let sessionId = sessionStorage.getItem('hyperlinker_session') || null;
         let volumeCount = 0;
         let uploadedVolumes = 0; // how many volumes have been successfully uploaded
 
@@ -325,6 +357,7 @@
             uploadLabel.textContent = 'Uploading...';
             const formData = new FormData();
             formData.append('file', file);
+            if (sessionId) formData.append('session_id', sessionId);
             try {
                 const resp = await fetch('/hyperlinker/upload', { method: 'POST', body: formData });
                 const data = await resp.json();
@@ -333,11 +366,35 @@
                     return;
                 }
                 sessionId = data.session_id;
+                sessionStorage.setItem('hyperlinker_session', sessionId);
                 uploadZone.classList.add('has-file');
                 uploadIcon.textContent = '\u2705';
                 uploadLabel.style.display = 'none';
                 uploadFilename.textContent = data.filename;
                 uploadFilename.style.display = 'block';
+                // Show replace button
+                let replaceBtn = document.getElementById('replaceBriefBtn');
+                if (!replaceBtn) {
+                    replaceBtn = document.createElement('button');
+                    replaceBtn.id = 'replaceBriefBtn';
+                    replaceBtn.textContent = 'Replace Brief';
+                    replaceBtn.style.cssText = 'margin-top:8px;padding:6px 16px;border-radius:6px;border:1px solid rgba(255,255,255,0.3);background:transparent;color:#888;cursor:pointer;font-size:0.85em;';
+                    replaceBtn.addEventListener('click', () => {
+                        const replaceInput = document.createElement('input');
+                        replaceInput.type = 'file';
+                        replaceInput.accept = '.docx,.pdf';
+                        replaceInput.addEventListener('change', () => {
+                            if (replaceInput.files.length) handleUpload(replaceInput.files[0]);
+                        });
+                        replaceInput.click();
+                    });
+                    uploadZone.parentNode.insertBefore(replaceBtn, uploadZone.nextSibling);
+                }
+                if (data.replaced) {
+                    // Brief was replaced in existing session — volumes still intact
+                    document.getElementById('downloadBtn').style.display = 'none';
+                    document.getElementById('statusMsg').textContent = 'Brief replaced. Click "Add Hyperlinks" to reprocess.';
+                }
                 // Enable step 2
                 document.getElementById('volumeCard').style.opacity = '1';
                 document.getElementById('volumeCard').style.pointerEvents = 'auto';
@@ -348,6 +405,34 @@
             }
         }
 
+        // --- Court System Toggle ---
+        document.getElementById('courtSystem').addEventListener('change', function() {
+            const instructions = document.getElementById('volumeInstructions');
+            const checkboxes = document.querySelectorAll('.cite-format');
+            if (this.value === 'ecf') {
+                instructions.textContent = 'For each appendix volume: paste the CM/ECF document URL and upload the PDF. Page labels will be read automatically.';
+                // Federal default: A. and JA. checked, bare unchecked
+                checkboxes.forEach(cb => {
+                    cb.checked = ['a_dot', 'ja_dot'].includes(cb.value);
+                });
+            } else {
+                instructions.textContent = 'For each volume: paste the NYSCEF URL and upload the PDF from your local files. Page labels will be read automatically.';
+                // NYSCEF default: bare checked, others unchecked
+                checkboxes.forEach(cb => {
+                    cb.checked = cb.value === 'bare';
+                });
+            }
+            // Update volume entry labels for any existing volumes
+            const cs = this.value;
+            document.querySelectorAll('.volume-entry').forEach(entry => {
+                const urlLabel = entry.querySelector('label');
+                const pdfLabels = entry.querySelectorAll('label');
+                if (urlLabel) {
+                    urlLabel.textContent = cs === 'ecf' ? 'ECF Document URL' : 'NYSCEF URL';
+                }
+            });
+        });
+
         // --- Volume Config ---
         const volumeList = document.getElementById('volumeList');
         document.getElementById('addVolumeBtn').addEventListener('click', addVolumeEntry);
@@ -357,17 +442,38 @@
             const entry = document.createElement('div');
             entry.className = 'volume-entry';
             entry.dataset.volNum = volumeCount;
+            const cs = document.getElementById('courtSystem').value;
+            const isNyscef = cs === 'nyscef';
+            const urlLabel = isNyscef ? 'NYSCEF URL' : 'Document URL (optional — leave blank for relative file links)';
+            const urlPlaceholder = isNyscef
+                ? 'https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex=...'
+                : 'Paste URL or leave blank to link by filename';
+            const pdfLabel = isNyscef ? 'Record Volume PDF' : 'Appendix / Record Volume PDF';
             entry.innerHTML = `
                 <div class="volume-header">
                     <span class="vol-title">Volume ${volumeCount}</span>
                     <button class="btn-remove-vol">Remove</button>
                 </div>
-                <label>NYSCEF URL</label>
-                <input type="text" class="vol-url" placeholder="https://iapps.courts.state.ny.us/nyscef/ViewDocument?docIndex=...">
-                <label>Record Volume PDF</label>
+                <label>${urlLabel}</label>
+                <input type="text" class="vol-url" placeholder="${urlPlaceholder}">
+                <label>${pdfLabel}</label>
                 <div class="vol-pdf-zone">
-                    Click to upload PDF (same file you filed on NYSCEF)
+                    Click to upload PDF
                     <input type="file" accept=".pdf">
+                </div>
+                <div class="vol-offset-fields" style="display:none; margin-top: 8px;">
+                    <p style="color: #ffa500; font-size: 0.85em; margin-bottom: 8px;">No page labels found. Enter the page range manually:</p>
+                    <div style="display: flex; gap: 12px;">
+                        <div style="flex: 1;">
+                            <label style="font-size: 0.85em;">First record/appendix page in this volume</label>
+                            <input type="number" class="vol-start-page" placeholder="e.g. 1 or 564" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.08); color: #fff;">
+                        </div>
+                        <div style="flex: 1;">
+                            <label style="font-size: 0.85em;">Front matter pages (cover, TOC)</label>
+                            <input type="number" class="vol-front-matter" placeholder="e.g. 0 or 7" value="0" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.08); color: #fff;">
+                        </div>
+                    </div>
+                    <button class="btn-retry-upload" style="margin-top: 8px; padding: 6px 16px; border-radius: 6px; border: 1px solid #ffa500; background: transparent; color: #ffa500; cursor: pointer;">Retry with offset</button>
                 </div>
                 <div class="vol-status"></div>
             `;
@@ -417,8 +523,9 @@
             const file = pdfInput.files[0];
             if (!file) return;
 
-            const nyscefUrl = urlInput.value.trim();
-            if (!nyscefUrl) {
+            const docUrl = urlInput.value.trim();
+            const courtSystem = document.getElementById('courtSystem').value;
+            if (!docUrl && courtSystem === 'nyscef') {
                 statusDiv.className = 'vol-status error';
                 statusDiv.textContent = 'Enter the NYSCEF URL first';
                 return;
@@ -430,14 +537,61 @@
             const formData = new FormData();
             formData.append('file', file);
             formData.append('session_id', sessionId);
-            formData.append('nyscef_url', nyscefUrl);
+            formData.append('doc_url', docUrl);
+            formData.append('nyscef_url', docUrl);
+            formData.append('court_system', courtSystem);
 
             try {
                 const resp = await fetch('/hyperlinker/upload-volume', { method: 'POST', body: formData });
                 const data = await resp.json();
+                if (data.error === 'no_labels') {
+                    // Show offset fields for manual page range entry
+                    const offsetFields = entry.querySelector('.vol-offset-fields');
+                    offsetFields.style.display = 'block';
+                    statusDiv.className = 'vol-status';
+                    statusDiv.textContent = '';
+                    // Wire up retry button
+                    const retryBtn = entry.querySelector('.btn-retry-upload');
+                    retryBtn.onclick = async () => {
+                        const startPage = entry.querySelector('.vol-start-page').value.trim();
+                        const frontMatter = entry.querySelector('.vol-front-matter').value.trim() || '0';
+                        if (!startPage) {
+                            statusDiv.className = 'vol-status error';
+                            statusDiv.textContent = 'Enter the first page number';
+                            return;
+                        }
+                        statusDiv.className = 'vol-status';
+                        statusDiv.textContent = 'Retrying with offset...';
+                        const retryForm = new FormData();
+                        retryForm.append('file', pdfInput.files[0]);
+                        retryForm.append('session_id', sessionId);
+                        retryForm.append('doc_url', docUrl);
+                        retryForm.append('nyscef_url', docUrl);
+                        retryForm.append('court_system', courtSystem);
+                        retryForm.append('start_page', startPage);
+                        retryForm.append('front_matter', frontMatter);
+                        const r2 = await fetch('/hyperlinker/upload-volume', { method: 'POST', body: retryForm });
+                        const d2 = await r2.json();
+                        if (d2.error) {
+                            statusDiv.className = 'vol-status error';
+                            statusDiv.textContent = d2.message || d2.error;
+                            return;
+                        }
+                        entry.classList.add('uploaded');
+                        entry.dataset.serverIndex = d2.vol_index;
+                        pdfZone.classList.add('has-file');
+                        pdfZone.textContent = file.name;
+                        offsetFields.style.display = 'none';
+                        statusDiv.className = 'vol-status success';
+                        statusDiv.textContent = d2.label_count + ' pages mapped (manual offset)';
+                        uploadedVolumes++;
+                        updateProcessBtn();
+                    };
+                    return;
+                }
                 if (data.error) {
                     statusDiv.className = 'vol-status error';
-                    statusDiv.textContent = data.error;
+                    statusDiv.textContent = data.message || data.error;
                     return;
                 }
                 entry.classList.add('uploaded');
@@ -476,10 +630,19 @@
             statusMsg.textContent = 'Reading page labels and adding hyperlinks...';
 
             try {
+                const citationFormats = Array.from(document.querySelectorAll('.cite-format:checked'))
+                    .map(cb => cb.value);
+                if (citationFormats.length === 0) {
+                    statusMsg.className = 'status-msg error';
+                    statusMsg.textContent = 'Select at least one citation format.';
+                    processBtn.disabled = false;
+                    processBtn.textContent = 'Add Hyperlinks';
+                    return;
+                }
                 const resp = await fetch('/hyperlinker/process', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId })
+                    body: JSON.stringify({ session_id: sessionId, citation_formats: citationFormats })
                 });
                 const data = await resp.json();
                 if (data.error) {
@@ -490,7 +653,9 @@
                     return;
                 }
                 statusMsg.className = 'status-msg success';
-                statusMsg.textContent = data.link_count + ' citation' + (data.link_count !== 1 ? 's' : '') + ' hyperlinked across ' + data.volumes_parsed + ' volume' + (data.volumes_parsed !== 1 ? 's' : '');
+                let msg = data.link_count + ' citation' + (data.link_count !== 1 ? 's' : '') + ' hyperlinked across ' + data.volumes_parsed + ' volume' + (data.volumes_parsed !== 1 ? 's' : '');
+                if (data.merged) msg += ' (merged PDF with internal links)';
+                statusMsg.textContent = msg;
                 downloadBtn.style.display = 'block';
                 processBtn.textContent = 'Add Hyperlinks';
                 processBtn.disabled = false;

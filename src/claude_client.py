@@ -33,7 +33,7 @@ def call_claude(prompt: str, max_tokens: int = 4000, model: str = 'sonnet', syst
 
             kwargs = {
                 'model': model_id,
-                'max_tokens': min(max_tokens + THINKING_BUDGET * 4, 64000),
+                'max_tokens': min(max_tokens + THINKING_BUDGET * 4, 32000 if 'opus' in model_id else 64000),
                 'messages': [{"role": "user", "content": prompt}],
                 'thinking': {'type': 'enabled', 'budget_tokens': THINKING_BUDGET},
             }
@@ -143,7 +143,7 @@ def call_claude_with_docs(prompt: str, documents: list, max_tokens: int = 8000, 
 
             kwargs = {
                 'model': model_id,
-                'max_tokens': min(max_tokens + THINKING_BUDGET * 4, 64000),
+                'max_tokens': min(max_tokens + THINKING_BUDGET * 4, 32000 if 'opus' in model_id else 64000),
                 'messages': [{"role": "user", "content": content}],
                 'thinking': {'type': 'enabled', 'budget_tokens': THINKING_BUDGET},
             }

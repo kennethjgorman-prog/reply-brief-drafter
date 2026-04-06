@@ -262,6 +262,66 @@ def _doc_entry(label, doc_dict, default_priority):
     return (label, doc_dict.get('text', ''), default_priority)
 
 
+def _classify_source_doc(doc):
+    """Classify a source document by its filename and content.
+    Returns a prompt label that tells the AI exactly what this document is,
+    so it never cites an affirmation as testimony or a defense paper as fact."""
+    fname = doc.get('filename', '').lower()
+    text = doc.get('text', '')[:2000].lower()
+    original_fname = doc.get('filename', 'Unknown')
+
+    # Transcript summaries from summarizer
+    if doc.get('source') == 'transcript_summarizer':
+        return f'TRANSCRIPT SUMMARY: {original_fname}'
+
+    # Expert affirmations — detect by filename patterns
+    if 'affirmation' in fname or 'affidavit' in fname:
+        # Determine plaintiff vs defendant expert
+        if any(w in fname for w in ['plaintiff', 'pl_', 'pltf']):
+            return (f'PLAINTIFF\'S EXPERT AFFIRMATION: {original_fname} '
+                    f'(THIS IS AN EXPERT OPINION — cite for expert analysis, '
+                    f'NOT as testimony by a fact witness)')
+        if any(w in fname for w in ['defendant', 'def_', 'deft', 'reply']):
+            return (f'DEFENDANT\'S EXPERT AFFIRMATION: {original_fname} '
+                    f'(THIS IS THE OPPOSING PARTY\'S EXPERT — '
+                    f'do NOT state their claims as established facts. '
+                    f'Use "defendant\'s expert claims" or "purportedly")')
+        # Check full content for clues (not just first 2000 chars)
+        full_text = doc.get('text', '').lower()
+        if 'i disagree' in full_text or 'i respectfully disagree' in full_text or 'plaintiffs\' expert' in text:
+            return (f'PLAINTIFF\'S EXPERT AFFIRMATION: {original_fname} '
+                    f'(THIS IS AN EXPERT OPINION — cite for expert analysis, '
+                    f'NOT as testimony by a fact witness)')
+        if 'defendant respectfully' in text or 'plaintiff fails' in text or 'should be denied' in text:
+            return (f'DEFENDANT\'S EXPERT AFFIRMATION: {original_fname} '
+                    f'(THIS IS THE OPPOSING PARTY\'S EXPERT — '
+                    f'do NOT state their claims as established facts)')
+        return (f'EXPERT AFFIRMATION: {original_fname} '
+                f'(EXPERT OPINION — cite for expert analysis, NOT as fact witness testimony)')
+
+    # Reply affirmations / opposition papers
+    if 'reply' in fname and ('aff' in fname or 'memo' in fname):
+        return (f'DEFENDANT\'S REPLY PAPERS: {original_fname} '
+                f'(OPPOSING PARTY\'S ADVOCACY — do NOT state as fact. '
+                f'Use "defendant contends" or "purportedly")')
+
+    # Lab results, radiology, medical records
+    if any(w in fname for w in ['lab', 'test_result', 'ct_scan', 'radiology', 'mri', 'xray']):
+        return f'MEDICAL RECORDS/LAB RESULTS: {original_fname} (objective medical evidence — cite as fact)'
+
+    # Progress notes
+    if 'progress_note' in fname or 'clinical_note' in fname:
+        return f'MEDICAL RECORDS: {original_fname} (clinical records — cite as fact)'
+
+    # Deposition transcripts
+    if any(w in fname for w in ['deposition', 'depo', 'transcript', 'ebt']):
+        return f'DEPOSITION TRANSCRIPT: {original_fname} (sworn testimony — cite as "[witness] testified")'
+
+    # Default — generic with warning
+    return (f'SOURCE DOCUMENT: {original_fname} '
+            f'(verify document type before citing as "testimony" or "fact")')
+
+
 def build_doc_items_for_brief_type(docs, record_combined, research_text, brief_type):
     """Build the (label, text, priority) list for _fit_documents based on brief type.
     Shared by draft_section and revise_brief to eliminate duplication."""
@@ -295,13 +355,17 @@ def build_doc_items_for_brief_type(docs, record_combined, research_text, brief_t
             ('LEGAL RESEARCH', research_text, 'secondary'),
         ]
 
-    # Add source documents
+    # Add source documents with accurate type labels
+    # Source docs uploaded by the attorney are CRITICAL — never truncated
     for key, val in docs.items():
         if key.startswith('source_doc_'):
             if val.get('source') == 'transcript_summarizer':
                 doc_items.append((f'TRANSCRIPT SUMMARY: {val.get("filename", key)}', val.get('text', ''), 'primary'))
             else:
-                doc_items.append((f'SOURCE: {val.get("filename", key)}', val.get('text', ''), 'primary'))
+                label = _classify_source_doc(val)
+                doc_items.append((f"ATTORNEY'S SOURCE DOCUMENT: {label}", val.get('text', ''), 'critical'))
+        elif key.startswith('transcript_digest_'):
+            doc_items.append((f'TRANSCRIPT SUMMARY: {val.get("filename", key)}', val.get('text', ''), 'primary'))
 
     return doc_items
 

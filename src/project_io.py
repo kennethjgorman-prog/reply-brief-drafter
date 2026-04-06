@@ -4,6 +4,7 @@ BriefDrafter project I/O: file extraction, project load/save.
 
 import json
 import fcntl
+import re
 from pathlib import Path
 
 import pdfplumber
@@ -16,21 +17,48 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def _parse_record_start_page(file_path: Path):
+    """Extract the starting record page number from a record volume filename.
+
+    Matches patterns like 'p._1-632' or 'p._633-1170' in the filename
+    and returns the starting page number (e.g., 1 or 633).
+    Returns None if the file is not a record volume.
+    """
+    name = file_path.stem  # filename without extension
+    if not name.startswith('record_vol_'):
+        return None
+    m = re.search(r'p[._]+(\d+)\s*-\s*\d+', name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def extract_text(file_path: Path) -> str:
-    """Extract text from PDF, DOCX, or TXT file"""
+    """Extract text from PDF, DOCX, or TXT file.
+
+    For record volume PDFs, page numbers are detected from the printed
+    page number at the top of each page. If the first line is not numeric,
+    falls back to a filename-derived calculation for record volumes
+    (using the page range in the filename, e.g. p._1-632), or sequential
+    numbering for other PDFs.
+    """
     ext = file_path.suffix.lower()
 
     if ext == '.pdf':
         text_parts = []
+        record_start = _parse_record_start_page(file_path)
         try:
             with pdfplumber.open(file_path) as pdf:
                 for i, page in enumerate(pdf.pages, 1):
                     page_text = page.extract_text() or ""
                     if page_text.strip():
-                        # Use printed page number from top of page if available
+                        # Try to detect printed page number from first line
                         first_line = page_text.strip().split('\n')[0].strip()
                         if first_line.isdigit():
                             page_label = first_line
+                        elif record_start is not None:
+                            # Record volume fallback: calculate from filename
+                            page_label = str(record_start + (i - 1))
                         else:
                             page_label = str(i)
                         text_parts.append(f"--- PAGE {page_label} ---\n{page_text}")

@@ -57,6 +57,34 @@ def validate_revision_integrity(pre_metrics, post_metrics):
     return violations
 
 
+def validate_supplement_integrity(pre_metrics, post_metrics):
+    """Supplement validation: content should only grow, never shrink."""
+    violations = []
+
+    if post_metrics['words'] < pre_metrics['words']:
+        loss_pct = (1 - post_metrics['words'] / max(pre_metrics['words'], 1)) * 100
+        violations.append(
+            f"Word count DECREASED {loss_pct:.0f}% ({pre_metrics['words']} -> {post_metrics['words']}). "
+            f"Supplement should only ADD content."
+        )
+
+    if pre_metrics['record_cites'] > 3 and post_metrics['record_cites'] < pre_metrics['record_cites']:
+        violations.append(f"Record citations decreased ({pre_metrics['record_cites']} -> {post_metrics['record_cites']})")
+
+    if pre_metrics['case_cites'] > 2 and post_metrics['case_cites'] < pre_metrics['case_cites']:
+        violations.append(f"Case citations decreased ({pre_metrics['case_cites']} -> {post_metrics['case_cites']})")
+
+    if pre_metrics['quotes'] > 3 and post_metrics['quotes'] < pre_metrics['quotes']:
+        violations.append(f"Quoted testimony decreased ({pre_metrics['quotes']} -> {post_metrics['quotes']})")
+
+    pre_points = pre_metrics['points'] if isinstance(pre_metrics['points'], list) else []
+    post_points = post_metrics['points'] if isinstance(post_metrics['points'], list) else []
+    if len(pre_points) != len(post_points):
+        violations.append(f"Point headings changed ({len(pre_points)} -> {len(post_points)})")
+
+    return violations
+
+
 def validate_citations(memo_text: str, *source_texts) -> str:
     """Validate case citations against source materials.
     Two checks:
@@ -407,6 +435,74 @@ def enforce_style_conformance(text: str) -> str:
     result = re.sub(r'\.\s+\(([Ss]ee,?\s)', r' (\1', result)
     result = re.sub(r'\.\s+\((\d[\d\-\u2013, ]*)\)', r' (\1).', result)
 
+    # Citation format cleanup: strip periods from reporter abbreviations
+    result = re.sub(r'A\.D\.2d', 'AD2d', result)
+    result = re.sub(r'A\.D\.3d', 'AD3d', result)
+    result = re.sub(r'A\.D\.', 'AD', result)
+    result = re.sub(r'N\.Y\.2d', 'NY2d', result)
+    result = re.sub(r'N\.Y\.3d', 'NY3d', result)
+    result = re.sub(r'N\.Y\.S\.2d', 'NYS2d', result)
+    result = re.sub(r'N\.Y\.S\.3d', 'NYS3d', result)
+    result = re.sub(r'N\.Y\.S\.', 'NYS', result)
+    result = re.sub(r'N\.Y\.', 'NY', result)
+    result = re.sub(r'N\.E\.2d', 'NE2d', result)
+    result = re.sub(r'N\.E\.3d', 'NE3d', result)
+
+    # Strip parallel citations (NYS2d/NYS3d/NE2d) — NY Official format uses only AD/NY reporters
+    result = re.sub(r',\s*\d+\s+NYS2d\s+\d+', '', result)
+    result = re.sub(r',\s*\d+\s+NYS3d\s+\d+', '', result)
+    result = re.sub(r',\s*\d+\s+NE2d\s+\d+', '', result)
+    result = re.sub(r',\s*\d+\s+NE3d\s+\d+', '', result)
+
+    # Convert **bold case names** to _underscored_
+    result = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', result)
+    result = result.replace('****', '')
+
+    # Court hierarchy: "this Court" before NY2d/NY3d cites → "the Court of Appeals"
+    # NY2d/NY3d = Court of Appeals, NOT the Appellate Division ("this Court")
+    court_fix_count = len(re.findall(
+        r'[Tt]his\s+Court\s+(?:held|explained|stated|noted|observed|recognized|ruled|found|determined|concluded)'
+        r'.{0,80}?\d+\s+NY[23]d\s+\d+', result, re.DOTALL
+    ))
+    result = re.sub(
+        r'([Tt])his\s+Court(\s+(?:held|explained|stated|noted|observed|recognized|ruled|found|determined|concluded))'
+        r'(?=.{0,80}?\d+\s+NY[23]d\s+\d+)',
+        r'the Court of Appeals\2', result, flags=re.DOTALL
+    )
+    if court_fix_count:
+        print(f"[STYLE CONFORMANCE] Fixed {court_fix_count} 'this Court' reference(s) to Court of Appeals cases", flush=True)
+        replacements += court_fix_count
+
+    # Replace Slip Op citations with full official cites found earlier in the document
+    # Build lookup: case name -> full citation from the document itself
+    full_cite_pattern = re.compile(
+        r'_([^_]+?v\.?\s+[^_]+?)_,?\s+(\d+\s+(?:AD[23]d|NY[23]d|Misc\s*[23]d)\s+\d+\s*\[.+?\])'
+    )
+    cite_lookup = {}
+    for m in full_cite_pattern.finditer(result):
+        # Normalize case name for matching
+        case_key = re.sub(r'\s+', ' ', m.group(1).strip()).lower()
+        cite_lookup[case_key] = m.group(2).strip()
+
+    # Find Slip Op references and replace with full cite if available
+    slip_op_pattern = re.compile(
+        r'_([^_]+?v\.?\s+[^_]+?)_,?\s+\d{4}\s+NY\s+Slip\s+Op\.?\s*[\d.]*'
+    )
+    slip_count = 0
+    def _replace_slip_op(m):
+        nonlocal slip_count
+        case_name = m.group(1).strip()
+        case_key = re.sub(r'\s+', ' ', case_name).lower()
+        if case_key in cite_lookup:
+            slip_count += 1
+            return f'_{case_name}_, {cite_lookup[case_key]}'
+        return m.group(0)
+
+    result = slip_op_pattern.sub(_replace_slip_op, result)
+    if slip_count:
+        print(f"[STYLE CONFORMANCE] Replaced {slip_count} Slip Op cite(s) with full official cites", flush=True)
+        replacements += slip_count
+
     if replacements:
         print(f"[STYLE CONFORMANCE] Fixed {replacements} AI-ism(s)", flush=True)
 
@@ -471,6 +567,127 @@ def consolidate_transcript_cites(draft_text: str) -> str:
 
     if count:
         print(f"[CITE CONSOLIDATE] Merged line ranges in {count} transcript citation(s)", flush=True)
+
+    return result
+
+
+def sanitize_deposition_format_cites(draft_text: str, max_record_page=0) -> str:
+    """Detect and flag deposition-format citations that the model generates
+    instead of proper record page numbers.
+
+    Deposition-format: (2-4), (4-85, 91), (2-4, 10-12) where the first number
+    is a deponent volume number and subsequent numbers are deposition-internal
+    page numbers. These are WRONG — the brief must cite record page numbers.
+
+    Detection rules:
+    1. Multi-group with leading small number: (N-M, ...) where N <= 15
+       e.g. (4-85, 91) = deponent 4, pages 85+91 — NOT record pages 4-85
+    2. Huge gap single range: (N-M) where N <= 10 AND M-N > 20
+       e.g. (4-85) — no attorney cites an 81-page range for one fact
+    3. Multi-group all-small: (N-M, A-B) where all numbers < 20
+       e.g. (2-4, 10-12) — clearly deposition volume+page groups
+    """
+    if not draft_text:
+        return draft_text
+
+    # Pattern: parenthesized numbers with hyphens and optional commas
+    # Matches: (2-4), (4-85, 91), (2-4, 10-12), (5-10)
+    cite_re = re.compile(
+        r'\((\d{1,4}\s*[-\u2013]\s*\d{1,4}'  # first group: N-M
+        r'(?:\s*,\s*\d{1,4}(?:\s*[-\u2013]\s*\d{1,4})?)*'  # optional: , A or , A-B
+        r')\)'
+    )
+
+    flagged_count = 0
+    result = draft_text
+
+    # Process in reverse order to preserve string positions
+    matches = list(cite_re.finditer(draft_text))
+
+    for m in reversed(matches):
+        inner = m.group(1).strip()
+        full_match = m.group(0)
+
+        # Skip if it looks like a case citation context (preceded by reporter)
+        pre_context = draft_text[max(0, m.start()-30):m.start()]
+        if re.search(r'(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d|NE[23]d)\s*$', pre_context):
+            continue
+
+        # Parse all numbers from the citation
+        parts = re.split(r'\s*,\s*', inner)
+        all_nums = []
+        has_hyphen_group = False
+        first_in_hyphen = None
+
+        for part in parts:
+            hyphen_match = re.match(r'(\d+)\s*[-\u2013]\s*(\d+)', part.strip())
+            if hyphen_match:
+                n1 = int(hyphen_match.group(1))
+                n2 = int(hyphen_match.group(2))
+                all_nums.extend([n1, n2])
+                has_hyphen_group = True
+                if first_in_hyphen is None:
+                    first_in_hyphen = n1
+            else:
+                num_match = re.match(r'(\d+)', part.strip())
+                if num_match:
+                    all_nums.append(int(num_match.group(1)))
+
+        if not has_hyphen_group or not all_nums:
+            continue
+
+        is_depo_format = False
+        reason = ''
+
+        # Rule 1: Multi-group with leading small number
+        # (4-85, 91) — first number is 4 (deponent), rest are pages
+        # (3-15, 20) — first number is 3, multiple groups = depo format
+        if len(parts) > 1 and first_in_hyphen is not None and first_in_hyphen <= 10:
+            hyphen_match = re.match(r'(\d+)\s*[-\u2013]\s*(\d+)', parts[0].strip())
+            if hyphen_match:
+                n1, n2 = int(hyphen_match.group(1)), int(hyphen_match.group(2))
+                is_depo_format = True
+                reason = f'deponent {n1}, pages in multi-group citation'
+
+        # Rule 2: Huge gap single range with small first number
+        # (4-85) — 81-page gap, first number ≤ 10
+        if not is_depo_format and len(parts) == 1 and first_in_hyphen is not None:
+            hyphen_match = re.match(r'(\d+)\s*[-\u2013]\s*(\d+)', parts[0].strip())
+            if hyphen_match:
+                n1, n2 = int(hyphen_match.group(1)), int(hyphen_match.group(2))
+                gap = n2 - n1
+                if n1 <= 10 and gap > 20:
+                    is_depo_format = True
+                    reason = f'deponent {n1}, page {n2} (gap {gap})'
+
+        # Rule 3: Multi-group all-small numbers with hyphens
+        # (2-4, 10-12) — all numbers < 20, multiple hyphenated groups
+        if not is_depo_format and len(parts) > 1:
+            hyphenated_groups = sum(1 for p in parts if re.match(r'\d+\s*[-\u2013]\s*\d+', p.strip()))
+            if hyphenated_groups >= 2 and all(n < 20 for n in all_nums):
+                is_depo_format = True
+                reason = 'multiple small hyphenated groups'
+
+        # Rule 4: Single small range where record is large
+        # (5-10) when record is 4000+ pages — pages 5-10 are TOC/cover
+        if not is_depo_format and len(parts) == 1 and first_in_hyphen is not None:
+            hyphen_match = re.match(r'(\d+)\s*[-\u2013]\s*(\d+)', parts[0].strip())
+            if hyphen_match:
+                n1, n2 = int(hyphen_match.group(1)), int(hyphen_match.group(2))
+                if max_record_page > 100 and n1 <= 10 and n2 <= 20:
+                    is_depo_format = True
+                    reason = f'pages {n1}-{n2} in {max_record_page}-page record (likely TOC/cover)'
+
+        if is_depo_format:
+            flagged_count += 1
+            replacement = '[CITE NEEDED - verify record page]'
+            result = result[:m.start()] + replacement + result[m.end():]
+            print(f"[DEPO CITE] Flagged {full_match} — {reason}", flush=True)
+
+    if flagged_count:
+        print(f"[DEPO CITE] Replaced {flagged_count} deposition-format citation(s) with [CITE NEEDED]", flush=True)
+    else:
+        print("[DEPO CITE] No deposition-format citations detected", flush=True)
 
     return result
 
@@ -742,6 +959,339 @@ def verify_opposition_characterizations(draft_text: str, opposition_text: str,
     return result
 
 
+def _build_page_lookup(docs):
+    """Build mapping from record page number to actual page text from source documents.
+    Pure code — reads the --- PAGE X --- markers injected during PDF extraction."""
+    page_lookup = {}
+    for key, doc in docs.items():
+        text = doc.get('text', '')
+        if not text:
+            continue
+        parts = re.split(r'--- PAGE (\d+) ---', text)
+        for i in range(1, len(parts) - 1, 2):
+            try:
+                pg = int(parts[i])
+                content = parts[i + 1].strip()
+                if content:
+                    if pg in page_lookup:
+                        page_lookup[pg] += '\n' + content
+                    else:
+                        page_lookup[pg] = content
+            except (ValueError, IndexError):
+                continue
+    return page_lookup
+
+
+def _parse_cite_pages(cite_str):
+    """Parse citation string into list of page numbers."""
+    pages = []
+    parts = re.split(r'\s*,\s*', cite_str)
+    for part in parts:
+        if '-' in part or '\u2013' in part:
+            sub = re.split(r'[-\u2013]', part)
+            if len(sub) == 2:
+                try:
+                    s, e = int(sub[0].strip()), int(sub[1].strip())
+                    if e - s < 20:  # sanity: don't expand huge ranges
+                        pages.extend(range(s, e + 1))
+                except ValueError:
+                    pass
+        else:
+            try:
+                pages.append(int(part.strip()))
+            except ValueError:
+                pass
+    return pages
+
+
+def _identify_deponent(page_text):
+    """Identify who is speaking on a deposition/testimony page.
+    Looks for deponent name in page headers (e.g., '- Michael Konig, D.O. -')
+    and Q&A format indicators. Returns lowercase last name or empty string."""
+    # Pattern: "- FirstName LastName, Title -" in depo headers
+    header = re.search(r'-\s*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+([A-Z][a-z]+))(?:,|\s*-)', page_text[:500])
+    if header:
+        return header.group(2).lower()
+    # Pattern: "[Page N]\nDate\n{ 1) - FirstName LastName, Title -"
+    header2 = re.search(r'\{\s*\d+\)\s*-\s*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+([A-Z][a-z]+))', page_text[:500])
+    if header2:
+        return header2.group(2).lower()
+    # Pattern: "A. APPLEBAUM" style witness name
+    header3 = re.search(r'\b([A-Z])\.\s+([A-Z][a-z]+)\b', page_text[:300])
+    if header3:
+        return header3.group(2).lower()
+    return ''
+
+
+def _extract_claim_names(sentence):
+    """Extract person names referenced in a claim sentence.
+    Returns list of lowercase last names."""
+    names = []
+    # "Dr. Konig", "Ms. Doyban", "Mr. Applebaum", "PA Doyban"
+    for m in re.finditer(r'(?:Dr\.|Mr\.|Mrs\.|Ms\.|PA)\s+([A-Z][a-z]+)', sentence):
+        names.append(m.group(1).lower())
+    # Also catch "Konig testified", "Doyban ordered", etc.
+    for m in re.finditer(r'\b([A-Z][a-z]{2,})\s+(?:testified|confirmed|stated|acknowledged|admitted|ordered|recommended|prescribed|diagnosed|examined|referred|instructed)', sentence):
+        name = m.group(1).lower()
+        if name not in ('plaintiff', 'defendant', 'however', 'moreover', 'indeed', 'notably', 'despite', 'following', 'although'):
+            names.append(name)
+    return list(dict.fromkeys(names))  # deduplicate, preserve order
+
+
+def _extract_claim_numbers(sentence):
+    """Extract significant numbers from a claim sentence.
+    Returns list of number strings (e.g., ['11.7', '13', '94']).
+    Filters out years and very small numbers."""
+    numbers = []
+    for m in re.finditer(r'\b(\d+\.?\d*)\b', sentence):
+        val = m.group(1)
+        try:
+            num = float(val)
+            # Skip years (1900-2099), skip tiny numbers (< 3) unless decimal
+            if 1900 <= num <= 2099:
+                continue
+            if num < 3 and '.' not in val:
+                continue
+            numbers.append(val)
+        except ValueError:
+            continue
+    return numbers
+
+
+def verify_citations_from_source(draft_text: str, project: dict) -> str:
+    """Verify citations against actual source document pages.
+
+    PURE CODE — no AI calls, no prompts, no discretion.
+    Reads the actual page text from source documents and checks:
+    1. Deponent match: if claim names someone, that person must be on the page
+    2. Number match: specific numbers in the claim must appear on the page (or ±1 adjacent pages)
+    3. Never corrects — only flags [VERIFY] when a citation fails both checks
+
+    RULE: Never omit content. Never silently swap citations. Only flag problems.
+    """
+    docs = project.get('documents', {})
+    if not docs:
+        print("[SOURCE-VERIFY] No documents — skipping", flush=True)
+        return draft_text
+
+    # Build page lookup from actual source documents
+    page_lookup = _build_page_lookup(docs)
+    if not page_lookup:
+        print("[SOURCE-VERIFY] No pages extracted — skipping", flush=True)
+        return draft_text
+
+    print(f"[SOURCE-VERIFY] Page lookup: {len(page_lookup)} pages ({min(page_lookup)}-{max(page_lookup)})", flush=True)
+
+    # Citation pattern
+    cite_pattern = re.compile(
+        r'([^.!?\n]{20,}?)'
+        r'\((\d{1,5}'
+        r'(?:\s*[-\u2013]\s*\d{1,5})?'
+        r'(?:\s*,\s*\d{1,5}(?:\s*[-\u2013]\s*\d{1,5})?)*'
+        r')\)'
+    )
+    case_cite_re = re.compile(r'\d+\s+(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d)', re.IGNORECASE)
+    heading_re = re.compile(r'^[A-Z][A-Z\s,]+$')
+
+    # Lab value context: skip parenthetical numbers that follow measurement terms
+    lab_context_re = re.compile(
+        r'(?:hemoglobin|hematocrit|ferritin|iron|RBC|ESR|CRP|CK|ANA|RF|saturation|'
+        r'level|count|range|rating|factor|A1C|glucose)\s+(?:of\s+|was\s+|at\s+|'
+        r'level\s+(?:of\s+)?)?(?:listed\s+as\s+)?\d',
+        re.IGNORECASE
+    )
+
+    verified = 0
+    flagged = 0
+    flag_details = []
+
+    for match in cite_pattern.finditer(draft_text):
+        sentence = match.group(1).strip()
+        cite_str = match.group(2)
+        full_match = match.group(0)
+
+        # Skip case citations
+        if case_cite_re.search(full_match):
+            continue
+        # Skip headings
+        if heading_re.match(sentence):
+            continue
+        # Skip already flagged
+        if '[VERIFY]' in full_match:
+            continue
+
+        pages = _parse_cite_pages(cite_str)
+        if not pages:
+            continue
+        # Skip years
+        if all(1900 <= p <= 2099 for p in pages):
+            continue
+        # Skip wide ranges
+        if len(pages) > 10:
+            verified += 1
+            continue
+
+        # Get page text (including ±1 adjacent pages for testimony spanning breaks)
+        page_texts = []
+        pages_checked = set()
+        for p in pages:
+            for adj in [p - 1, p, p + 1]:
+                if adj in page_lookup and adj not in pages_checked:
+                    page_texts.append(page_lookup[adj])
+                    pages_checked.add(adj)
+
+        if not page_texts:
+            # Pages not in source docs — can't verify, skip
+            verified += 1
+            continue
+
+        combined_text = '\n'.join(page_texts).lower()
+
+        # CHECK 1: Deponent match
+        claim_names = _extract_claim_names(sentence)
+        attribution_words = re.search(
+            r'(?:testified|confirmed|stated|acknowledged|admitted|deposition|testimony)',
+            sentence, re.IGNORECASE
+        )
+        deponent_ok = True
+
+        if claim_names and attribution_words:
+            # The sentence attributes testimony to a specific person —
+            # that person must be identifiable on the cited pages
+            primary_name = claim_names[0]  # first named person
+            # Check if this person's name appears on any cited page
+            name_found = primary_name in combined_text
+            if not name_found:
+                deponent_ok = False
+                print(f"[SOURCE-VERIFY] DEPONENT MISMATCH: ({cite_str}) claims {primary_name} "
+                      f"but name not on page | {sentence[:80]}...", flush=True)
+
+        # CHECK 2: Number match (only if claim has specific numbers)
+        claim_numbers = _extract_claim_numbers(sentence)
+        numbers_ok = True
+
+        if claim_numbers:
+            found = sum(1 for n in claim_numbers if n in combined_text)
+            # Require at least half the numbers to be present
+            if len(claim_numbers) >= 2 and found == 0:
+                numbers_ok = False
+                print(f"[SOURCE-VERIFY] NUMBER MISMATCH: ({cite_str}) claims {claim_numbers} "
+                      f"but none found on page | {sentence[:80]}...", flush=True)
+
+        if deponent_ok and numbers_ok:
+            verified += 1
+        else:
+            flagged += 1
+            flag_details.append({
+                'cite': cite_str,
+                'sentence': sentence[:100],
+                'deponent_ok': deponent_ok,
+                'numbers_ok': numbers_ok
+            })
+
+    print(f"[SOURCE-VERIFY] Done: {verified} verified, {flagged} flagged", flush=True)
+    for fd in flag_details:
+        issues = []
+        if not fd['deponent_ok']:
+            issues.append('wrong deponent')
+        if not fd['numbers_ok']:
+            issues.append('numbers missing')
+        print(f"[SOURCE-VERIFY]   ({fd['cite']}) [{', '.join(issues)}]: {fd['sentence']}...", flush=True)
+
+    return draft_text  # NEVER modify the text — only log problems
+
+
+def _flag_testimony_cite_mismatch(draft_text: str, project: dict) -> str:
+    """PURE CODE — no AI, no prompts.
+    Detects sentences that say 'testified/acknowledged/confirmed' but cite
+    expert affirmation or defense reply pages instead of testimony pages.
+    Appends [VERIFY - CITE MAY BE AFFIRMATION, NOT TESTIMONY] to flagged sentences.
+    """
+    docs = project.get('documents', {})
+
+    # Build set of page numbers that come from affirmations/defense papers (NOT testimony)
+    affirmation_pages = set()
+    for key, doc in docs.items():
+        if not isinstance(doc, dict):
+            continue
+        fname = doc.get('filename', '').lower()
+        is_affirmation = ('affirmation' in fname or 'affidavit' in fname
+                          or 'reply' in fname)
+        if is_affirmation:
+            text = doc.get('text', '')
+            for m in re.finditer(r'---\s*PAGE\s+(\d+)\s*---', text):
+                affirmation_pages.add(int(m.group(1)))
+
+    # Also check source_doc entries that look like affirmations
+    for key, doc in docs.items():
+        if not isinstance(doc, dict) or not key.startswith('source_doc_'):
+            continue
+        fname = doc.get('filename', '').lower()
+        if 'affirmation' in fname or 'affidavit' in fname:
+            text = doc.get('text', '')
+            for m in re.finditer(r'---\s*PAGE\s+(\d+)\s*---', text):
+                affirmation_pages.add(int(m.group(1)))
+
+    if not affirmation_pages:
+        return draft_text
+
+    # Testimony language patterns — these words mean the sentence claims someone TESTIFIED
+    testimony_words = re.compile(
+        r'\b(testified|acknowledged|admitted|conceded|confirmed under oath|'
+        r'stated at (?:his|her|their) deposition|deposition testimony)\b',
+        re.IGNORECASE
+    )
+
+    # Find sentences with testimony language + citations
+    cite_pattern = re.compile(r'\((\d[\d,\s\-]+)\)')
+    flagged = 0
+    lines = draft_text.split('\n')
+    new_lines = []
+
+    for line in lines:
+        sentences = re.split(r'(?<=[.!?])\s+', line)
+        new_sentences = []
+        for sent in sentences:
+            has_testimony = testimony_words.search(sent)
+            if not has_testimony:
+                new_sentences.append(sent)
+                continue
+
+            # Check if any cited page is an affirmation page
+            cites_affirmation = False
+            for cite_match in cite_pattern.finditer(sent):
+                cite_str = cite_match.group(1)
+                for part in cite_str.split(','):
+                    part = part.strip()
+                    if '-' in part:
+                        try:
+                            a, b = part.split('-')
+                            for pg in range(int(a.strip()), int(b.strip()) + 1):
+                                if pg in affirmation_pages:
+                                    cites_affirmation = True
+                        except ValueError:
+                            pass
+                    else:
+                        try:
+                            if int(part) in affirmation_pages:
+                                cites_affirmation = True
+                        except ValueError:
+                            pass
+
+            if cites_affirmation:
+                flagged += 1
+                sent = sent.rstrip('.') + ' [VERIFY - CITE MAY BE AFFIRMATION, NOT TESTIMONY].'
+                print(f"[CITE-TYPE-MISMATCH] Testimony language cites affirmation page: {sent[:120]}...", flush=True)
+
+            new_sentences.append(sent)
+        new_lines.append('  '.join(new_sentences) if len(sentences) > 1 else line if not sentences else new_sentences[0])
+
+    if flagged:
+        print(f"[CITE-TYPE-MISMATCH] Flagged {flagged} sentences with testimony/affirmation mismatch", flush=True)
+
+    return '\n'.join(new_lines)
+
+
 def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', opening_brief_text: str = '', all_source_text: str = '', respondent_text: str = '', project: dict = None) -> str:
     """Post-processing guardrails for drafted briefs. Validates and fixes output programmatically.
     This is code, not a prompt — Claude can't ignore it."""
@@ -751,6 +1301,27 @@ def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', o
     # 0. Replace party surname with party label
     if project:
         result = _replace_party_surname(result, project)
+
+    # 0.5. Detect and flag deposition-format citations
+    # Compute max record page from project docs for Rule 4 (small-page detection)
+    max_record_page = 0
+    if project:
+        docs = project.get('documents', {})
+        for key, doc in docs.items():
+            if isinstance(doc, dict) and (key.startswith('record_vol') or key == 'record'):
+                text = doc.get('text', '')
+                pages = re.findall(r'---\s*PAGE\s+(\d+)\s*---', text)
+                if pages:
+                    max_record_page = max(max_record_page, max(int(p) for p in pages))
+    result = sanitize_deposition_format_cites(result, max_record_page=max_record_page)
+
+    # 0.7. Verify citations against actual source document pages (log-only, no modifications)
+    if project:
+        result = verify_citations_from_source(result, project)
+
+    # 0.8. Flag testimony language citing non-testimony pages (pure code, no AI)
+    if project:
+        result = _flag_testimony_cite_mismatch(result, project)
 
     # 1. Strip any markdown that slipped through
     result = re.sub(r'^#{1,4}\s+', '', result, flags=re.MULTILINE)
@@ -871,3 +1442,312 @@ def guardrail_brief(draft_text: str, brief_type: str, research_text: str = '', o
     result = enforce_style_conformance(result)
 
     return result
+
+
+def verify_factual_fidelity(draft_text, project, model='sonnet'):
+    """Post-draft verification: compare factual claims in the draft against
+    source documents (expert affirmations, medical records, attorney work product).
+
+    Catches:
+    - Contradictions (source says X, draft says not-X)
+    - Material oversimplification (source says nuanced X+Y, draft only says X)
+    - Directional inversions (source says increased, draft says decreased)
+    - Wrong or dropped numerical values, dates, lab results
+
+    Returns the draft with inline [VERIFY FACTS: ...] flags where mismatches
+    are found.  Flags are advisory — the attorney makes the final call.
+    """
+    from src.claude_client import call_claude
+
+    if not draft_text or not project:
+        return draft_text
+
+    docs = project.get('documents', {})
+
+    # Collect source documents: expert affirmations, medical docs, attorney work product.
+    # Skip record volumes (too large, raw) and transcript digests (summaries).
+    source_parts = []
+    for key in sorted(docs.keys()):
+        doc = docs[key]
+        if not isinstance(doc, dict) or not doc.get('text'):
+            continue
+        if key.startswith('source_doc_') or key.startswith('additional_doc_'):
+            title = doc.get('title', '') or key
+            source_parts.append(f"=== {title} ===\n{doc['text']}")
+
+    # Also include existing_draft if present (attorney's own version is authoritative)
+    existing = docs.get('existing_draft', {})
+    if isinstance(existing, dict) and existing.get('text'):
+        source_parts.append(f"=== Attorney's Existing Draft ===\n{existing['text']}")
+
+    if not source_parts:
+        print("[FACT VERIFY] No source documents for verification, skipping", flush=True)
+        return draft_text
+
+    source_block = "\n\n".join(source_parts)
+    if len(source_block) > 300000:
+        source_block = source_block[:300000]
+        print("[FACT VERIFY] Source documents truncated to 300K chars", flush=True)
+
+    print(
+        f"[FACT VERIFY] Verifying draft ({len(draft_text.split())} words) "
+        f"against {len(source_parts)} source document(s) "
+        f"({len(source_block):,} chars)...",
+        flush=True,
+    )
+
+    prompt = f"""You are a legal accuracy auditor. Your ONLY task is to compare a draft brief against the source documents below and identify factual discrepancies.
+
+INSTRUCTIONS:
+Read each factual sentence in the DRAFT. For sentences that make claims about medical findings, test results, laboratory values, dates, numbers, diagnoses, expert opinions, or treatment details, find the corresponding passage in the SOURCE DOCUMENTS and check:
+
+1. ACCURACY: Does the draft match what the source actually says?
+2. COMPLETENESS: Does the draft capture the FULL meaning of the source passage, or does it drop nuance that changes the medical or legal significance? Pay special attention to passages where the source gives an overall characterization AND then provides specific details that qualify or complicate that characterization.
+3. DIRECTION: If the source says values increased/decreased/improved/worsened, does the draft preserve the correct direction for EACH specific value?
+4. VALUES: Are specific numbers, dates, lab values, and measurements correct?
+5. QUALIFIERS: Does the draft drop important qualifying language? (e.g., source says "mildly increased due to supplements masking the condition" but draft just says "increased" or "decreased")
+
+REPORT ONLY GENUINE DISCREPANCIES. Do NOT flag:
+- Stylistic differences or paraphrasing that preserves full meaning
+- Advocacy framing or argument structure choices
+- Sentences about legal standards, case law, or procedural history
+- Minor word choice changes that do not alter factual meaning
+- Omission of facts not relevant to the specific argument being made
+
+OUTPUT FORMAT — for EACH discrepancy:
+DRAFT: "[copy the exact sentence from the draft]"
+SOURCE: "[copy the relevant passage from the source document]"
+PAGE: [source page number if identifiable from PAGE markers]
+ISSUE: [specific description of what is wrong]
+===
+
+If NO discrepancies are found, output exactly: NO DISCREPANCIES FOUND
+
+=== DRAFT TO VERIFY ===
+{draft_text}
+
+=== SOURCE DOCUMENTS ===
+{source_block}"""
+
+    result = call_claude(prompt, max_tokens=8000, model=model)
+
+    if not result or result.startswith('ERROR:'):
+        print(f"[FACT VERIFY] API error, skipping: {result[:100]}", flush=True)
+        return draft_text
+
+    if 'NO DISCREPANCIES FOUND' in result:
+        print("[FACT VERIFY] No discrepancies found", flush=True)
+        return draft_text
+
+    # Parse discrepancies from the verifier output
+    blocks = re.split(r'={3,}', result)
+    flagged_count = 0
+    modified_draft = draft_text
+
+    for block in blocks:
+        block = block.strip()
+        if not block or 'DRAFT:' not in block:
+            continue
+
+        draft_match = re.search(r'DRAFT:\s*"([^"]+)"', block)
+        issue_match = re.search(r'ISSUE:\s*(.+)', block, re.DOTALL)
+
+        if not draft_match or not issue_match:
+            continue
+
+        draft_sentence = draft_match.group(1).strip()
+        issue = issue_match.group(1).strip().split('\n')[0].strip()
+
+        # Try exact match first
+        if draft_sentence in modified_draft:
+            flag = f" [VERIFY FACTS: {issue}]"
+            modified_draft = modified_draft.replace(draft_sentence, draft_sentence + flag, 1)
+            flagged_count += 1
+            print(f"[FACT VERIFY] FLAGGED: {draft_sentence[:80]}...", flush=True)
+            print(f"[FACT VERIFY]   ISSUE: {issue[:120]}", flush=True)
+            continue
+
+        # Fuzzy match: try first 50 characters of the draft sentence
+        search_text = draft_sentence[:50]
+        if len(search_text) > 20 and search_text in modified_draft:
+            idx = modified_draft.index(search_text)
+            # Find end of the sentence
+            end_region = modified_draft[idx:idx + len(draft_sentence) + 200]
+            period_pos = end_region.find('. ')
+            if period_pos == -1:
+                period_pos = end_region.find('.\n')
+            if period_pos > 0:
+                insert_at = idx + period_pos + 1
+                flag = f" [VERIFY FACTS: {issue}]"
+                modified_draft = modified_draft[:insert_at] + flag + modified_draft[insert_at:]
+                flagged_count += 1
+                print(f"[FACT VERIFY] FLAGGED (fuzzy): {search_text}...", flush=True)
+                print(f"[FACT VERIFY]   ISSUE: {issue[:120]}", flush=True)
+            else:
+                print(f"[FACT VERIFY] Could not locate sentence end: {search_text}...", flush=True)
+        else:
+            print(f"[FACT VERIFY] Could not locate in draft: {draft_sentence[:80]}...", flush=True)
+
+    if flagged_count:
+        print(f"[FACT VERIFY] Flagged {flagged_count} factual discrepancy(ies) for attorney review", flush=True)
+    else:
+        print("[FACT VERIFY] Verification complete, no flags inserted", flush=True)
+
+    return modified_draft
+
+
+def generate_irac_analysis(points, case_law='', record_evidence='', doc_type='brief', model='sonnet'):
+    """
+    IRAC analysis pass: for each Point heading, generate Issue/Rule/Application/Conclusion
+    breakdown using extracted cases and facts. Returns a block to inject into the drafting prompt
+    so the model has a structured legal reasoning framework before writing prose.
+    """
+    from src.claude_client import call_claude
+
+    if not points:
+        print("[IRAC] No Points defined — skipping analysis", flush=True)
+        return ''
+
+    points_block = ""
+    for pt in points:
+        heading = pt.get('heading', '')
+        arg_desc = pt.get('argument_description', '')
+        facts = pt.get('facts', '')
+        cases = pt.get('cases', '')
+        points_block += f"""
+POINT {pt.get('id', '?')}: {heading}
+{f'Attorney notes: {arg_desc}' if arg_desc else ''}
+{f'Key facts: {facts}' if facts else ''}
+{f'Key cases: {cases}' if cases else ''}
+---"""
+
+    context_block = ""
+    if case_law:
+        context_block += f"\n=== EXTRACTED CASE LAW ===\n{case_law[:50000]}\n"
+    if record_evidence:
+        context_block += f"\n=== EXTRACTED RECORD EVIDENCE ===\n{record_evidence[:50000]}\n"
+
+    if doc_type in ('brief', "appellant's brief", "respondent's brief", "reply brief"):
+        role = "senior appellate attorney"
+        prose_style = "appellate"
+    else:
+        role = "senior litigation attorney"
+        prose_style = "motion practice"
+
+    prompt = f"""You are a {role} analyzing legal arguments before drafting. For each Point below, produce a structured IRAC analysis that will serve as the reasoning framework for the drafting pass.
+
+For EACH Point, generate:
+
+ISSUE: State the precise legal question. Frame it as a question that, when answered, resolves the Point in your client's favor.
+
+RULE: Identify the governing legal standard, statute, or precedent. Use ONLY cases from the extracted case law below. Cite the specific holding and the standard the court applied. If multiple cases establish the rule, synthesize them.
+
+APPLICATION: Apply the rule to the specific facts of this case. Reference SPECIFIC record evidence from the extracts below. Show exactly how the facts satisfy (or defeat) each element of the legal standard. Address likely counterarguments and explain why they fail.
+
+CONCLUSION: State the conclusion that follows from the application. This should be the proposition the Point heading asserts.
+
+RULES:
+- Use ONLY cases from the extracted case law. Do NOT cite cases from your training data.
+- Reference SPECIFIC facts and record page numbers from the extracted evidence.
+- The APPLICATION section should be the most detailed — this is where legal analysis lives.
+- Each IRAC analysis should be 150-300 words. Be thorough but focused.
+- If a Point's heading and notes don't provide enough information for a full IRAC, do your best with what's available and note what's missing.
+
+=== POINTS TO ANALYZE ===
+{points_block}
+
+{context_block}
+
+OUTPUT FORMAT — for each Point:
+
+POINT [number]: [heading]
+ISSUE: [question]
+RULE: [standard + authorities]
+APPLICATION: [analysis applying rule to facts]
+CONCLUSION: [proposition]
+===
+"""
+
+    print(f"[IRAC] Generating analysis for {len(points)} Points...", flush=True)
+    result = call_claude(prompt, max_tokens=16000, model=model)
+    print(f"[IRAC] Analysis complete ({len(result.split())} words)", flush=True)
+
+    return f"""=== IRAC LEGAL ANALYSIS (use this framework to structure each argument) ===
+The following IRAC analysis breaks down the legal reasoning for each Point.
+Use this as the structural backbone for your arguments. The Issue frames the question,
+the Rule identifies the governing law, the Application shows how facts meet the standard,
+and the Conclusion states the proposition. Write prose that follows this logical progression.
+
+{result}
+
+=== END IRAC ANALYSIS ==="""
+
+
+def editorial_review_pass(draft_text, doc_type='brief', model='sonnet'):
+    """
+    Editorial review pass: identifies and fixes structural problems in drafts.
+    Catches repetitive Points, overlapping arguments, and opportunities to merge/tighten.
+    Runs after mechanical guardrails, before QC.
+    """
+    from src.claude_client import call_claude
+
+    # Count original metrics for validation
+    original_words = len(draft_text.split())
+    original_points = re.findall(r'^POINT\s+[IVXLCDM\d]+', draft_text, re.MULTILINE)
+
+    if original_words < 500:
+        print(f"[EDITORIAL] Skipped — draft too short ({original_words} words)", flush=True)
+        return draft_text
+
+    prompt = f"""You are a senior appellate attorney performing an editorial review of a draft {doc_type}. Your ONLY task is to identify and fix STRUCTURAL problems.
+
+REVIEW FOR THESE ISSUES:
+1. REPETITIVE POINTS: If two or more Points make substantially the same legal argument (even if phrased differently), merge them into one cohesive Point that makes the argument once, thoroughly, incorporating the strongest material from each.
+2. OVERLAPPING SECTIONS: If sub-sections across different Points cover the same ground (e.g., both discuss personal knowledge, both distinguish the same case), consolidate the overlapping material into whichever Point it fits best and remove it from the other.
+3. REDUNDANT PARAGRAPHS: If consecutive paragraphs restate the same point in slightly different words, combine them into one stronger paragraph.
+
+CRITICAL RULES — VIOLATIONS WILL CAUSE REJECTION:
+- DO NOT omit any substantive legal argument, case citation, record citation, or factual assertion.
+- DO NOT change the legal analysis, conclusions, or advocacy position.
+- DO NOT add new arguments, citations, or factual claims not already in the draft.
+- DO NOT alter case names, citation formats, record references, or quoted text.
+- DO NOT change the Preliminary Statement, Conclusion, or signature block.
+- DO NOT rewrite prose style or voice — preserve the existing phrasing.
+- If you merge Points, renumber ALL remaining Points sequentially (POINT I, POINT II, etc.) and update all Point headings.
+- If no structural changes are needed, return the draft EXACTLY as provided.
+
+OUTPUT: Return the COMPLETE revised draft. Plain text only, no commentary, no preamble.
+
+DRAFT TO REVIEW:
+{draft_text}"""
+
+    revised = call_claude(prompt, max_tokens=32000, model=model)
+
+    # Strip any preamble the model might add
+    for marker in ['SUPREME COURT', 'PRELIMINARY STATEMENT', 'POINT I']:
+        idx = revised.find(marker)
+        if idx > 0 and idx < 200:
+            pre = revised[:idx].strip()
+            if pre and not any(c in pre for c in ['(', 'v.', 'COURT', 'DIVISION']):
+                revised = revised[idx:]
+            break
+
+    # Validate: don't lose content
+    revised_words = len(revised.split())
+    revised_points = re.findall(r'^POINT\s+[IVXLCDM\d]+', revised, re.MULTILINE)
+
+    # Word count floor: 70% of original (merging reduces, but not by more than 30%)
+    if revised_words < original_words * 0.7:
+        print(f"[EDITORIAL] REJECTED — lost too much content: {original_words} → {revised_words} words ({revised_words/original_words:.0%})", flush=True)
+        return draft_text
+
+    # Log changes
+    if len(revised_points) < len(original_points):
+        print(f"[EDITORIAL] Merged Points: {len(original_points)} → {len(revised_points)}", flush=True)
+    word_diff = revised_words - original_words
+    if abs(word_diff) > 50:
+        print(f"[EDITORIAL] Word count: {original_words} → {revised_words} ({word_diff:+d})", flush=True)
+    else:
+        print(f"[EDITORIAL] No structural changes needed", flush=True)
+
+    return revised

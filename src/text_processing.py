@@ -86,20 +86,34 @@ def _truncate(text, max_chars):
 
 def _fit_documents(doc_list, max_total=MAX_TOTAL_CHARS):
     """Proportionally truncate a list of (label, text, priority) tuples to fit max_total.
-    Priority: 'primary' docs get 2x share vs 'secondary' docs.
+    Priority: 'critical' docs are included in full first (never truncated),
+    'primary' docs get 2x share vs 'secondary' docs.
     Documents smaller than their share redistribute surplus to larger docs."""
     total = sum(len(t) for _, t, _ in doc_list if t)
     if total <= max_total:
         return [(label, text) for label, text, _ in doc_list]
 
-    # Two-pass allocation: first pass assigns shares, second redistributes surplus
-    docs_with_text = [(i, label, text, priority) for i, (label, text, priority) in enumerate(doc_list) if text]
+    # Critical docs get their full text first — never truncated
+    critical_used = 0
+    for i, (label, text, priority) in enumerate(doc_list):
+        if text and priority == 'critical':
+            critical_used += len(text)
+
+    remaining_budget = max(0, max_total - critical_used)
+
+    # Two-pass allocation for non-critical docs
+    docs_with_text = [(i, label, text, priority) for i, (label, text, priority) in enumerate(doc_list) if text and priority != 'critical']
     total_weight = sum(2.0 if p == 'primary' else 1.0 for _, _, _, p in docs_with_text)
 
     allocations = {}
+    # Critical docs get full allocation
+    for i, (label, text, priority) in enumerate(doc_list):
+        if text and priority == 'critical':
+            allocations[i] = len(text)
+
     for i, label, text, priority in docs_with_text:
         weight = 2.0 if priority == 'primary' else 1.0
-        allocations[i] = int(max_total * (weight / total_weight))
+        allocations[i] = int(remaining_budget * (weight / total_weight)) if total_weight > 0 else 0
 
     # Redistribute surplus from docs that fit within their share
     surplus = 0

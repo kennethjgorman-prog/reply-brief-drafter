@@ -2065,6 +2065,14 @@
                 area.innerHTML = formatBriefText(data.full_brief);
                 showReviseSection();
 
+                // Show record truncation warning if present
+                if (data.record_warning) {
+                    const warningDiv = document.createElement('div');
+                    warningDiv.style.cssText = 'background:#fff3cd;border:1px solid #ffc107;padding:12px;margin:10px 0;border-radius:4px;color:#856404;font-weight:bold;';
+                    warningDiv.textContent = data.record_warning;
+                    area.parentNode.insertBefore(warningDiv, area);
+                }
+
             } catch (error) {
                 alert('Error: ' + error.message);
                 area.textContent = 'Error drafting brief';

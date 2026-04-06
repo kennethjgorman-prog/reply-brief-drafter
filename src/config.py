@@ -15,8 +15,8 @@ PROTOCOLS_DIR = BASE_DIR / 'protocols'
 CONFIG_PATH = BASE_DIR / 'config.json'
 PROJECTS_DIR = BASE_DIR / 'projects'
 PROJECTS_DIR.mkdir(exist_ok=True)
-SUMMARIZER_JOBS_DIR = Path.home() / 'Library' / 'CloudStorage' / 'Dropbox' / 'Appeals' / \
-    'Appellate and Motion Codes' / '1 Appellate Record Prompts' / 'jobs'
+SUMMARIZER_JOBS_DIR = Path.home() / 'Library' / 'CloudStorage' / 'Dropbox' / 'ProductionApps' / \
+    'Transcript Summarizer' / 'jobs'
 
 
 def _load_protocol(name):

@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Reply Brief Drafter Launcher
-# This app bundle launches the Reply Brief Drafter web application
+# Brief Drafter Launcher
+# This app bundle launches the Brief Drafter web application
 
-APP_DIR="/Users/kengorman/Library/CloudStorage/Dropbox/Reply Brief Drafter"
+APP_DIR="/Users/kengorman/Library/CloudStorage/Dropbox/ProductionApps/BriefDrafter"
 PORT=5003
 
 # Navigate to the application directory
@@ -20,6 +20,6 @@ fi
 osascript <<EOF
 tell application "Terminal"
     activate
-    do script "cd \"$APP_DIR\" && echo '==========================================' && echo '  REPLY BRIEF DRAFTER' && echo '==========================================' && echo '' && echo 'Starting server...' && echo '' && (sleep 2 && open 'http://127.0.0.1:$PORT') & python3 app.py"
+    do script "cd \"$APP_DIR\" && echo '==========================================' && echo '  BRIEF DRAFTER' && echo '==========================================' && echo '' && echo 'Starting server...' && echo '' && (sleep 2 && open 'http://127.0.0.1:$PORT') & python3 app.py"
 end tell
 EOF
