@@ -23,6 +23,30 @@ def extract_all_citations(draft: str) -> List[Dict]:
         # Skip if it looks like a case cite: (2d Dept 2020), (123 AD3d 456)
         if re.search(r'[A-Za-z]', inner):
             continue
+
+        # Skip if the parenthetical is a single 4-digit number that looks
+        # like a year (1800-2099). Common false positive: "Building Code of
+        # the City of New York (1968)", "Penal Law (1990)", etc.
+        single_num_match = re.fullmatch(r'\s*(\d+)\s*', inner)
+        if single_num_match:
+            num = int(single_num_match.group(1))
+            if 1800 <= num <= 2099:
+                # Check if context suggests a year reference (statute, code, act, etc.)
+                ctx_start = max(0, m.start() - 60)
+                preceding = draft[ctx_start:m.start()]
+                year_context_re = re.compile(
+                    r'\b(?:Code|Act|Law|Statute|Rules?|Regulations?|Constitution|'
+                    r'Edition|Ed\.?|Amendment|Chapter|Title|Article|Section|'
+                    r'§|enacted|adopted|amended|effective|version|year|circa|c\.|'
+                    r'published|promulgated|of(?:\s+the)?(?:\s+\w+){0,4})\b',
+                    re.IGNORECASE
+                )
+                if year_context_re.search(preceding):
+                    continue
+                # Even without explicit context, a bare 4-digit year is more
+                # likely a year than a record page in that range.
+                continue
+
         # Skip year-like numbers in brackets context
         pages = re.findall(r'\d+', inner)
         for p in pages:

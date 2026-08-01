@@ -742,7 +742,12 @@ def consolidate_bare_page_cites(draft_text: str) -> str:
 
 
 def _replace_party_surname(text, project):
-    """Replace the represented party's surname with their party label."""
+    """Replace the represented party's surname with their party label.
+
+    Skipped for corporate parties — extracting a 'surname' from a corporate
+    name (e.g., '610 Eighth Avenue Corp.') yields garbage like 'Corp.' which
+    then gets replaced everywhere in the brief.
+    """
     representing = project.get('representing', '')
     if not representing:
         return text
@@ -757,9 +762,30 @@ def _replace_party_surname(text, project):
     if not party_name:
         return text
 
+    # Skip corporate/entity parties — they don't have a "surname"
+    _entity_markers = re.compile(
+        r'\b(?:Corp\.?|Corporation|Inc\.?|Incorporated|LLC|L\.L\.C\.|Ltd\.?|Limited|'
+        r'Co\.?|Company|P\.?C\.?|L\.?P\.?|LLP|L\.L\.P\.|N\.?A\.?|Trust|Fund|'
+        r'Bank|Hospital|University|Authority|Department|Board|Commission|'
+        r'Agency|Association|Foundation|Institute|Center|Centre|Group|Holdings|'
+        r'Partners|Partnership|Realty|Properties|Estates|Enterprises|Services|'
+        r'Systems|Solutions|Industries|Ventures)\b',
+        re.IGNORECASE
+    )
+    if _entity_markers.search(party_name):
+        return text
+
+    # Also skip if the party name contains "and" (multi-party entity name)
+    if re.search(r'\band\b', party_name, re.IGNORECASE):
+        return text
+
     parts = party_name.split()
     surname = parts[-1].strip().title() if parts else ''
     if not surname or len(surname) < 3:
+        return text
+
+    # Surname must be alphabetic only — no periods, no digits
+    if not surname.isalpha():
         return text
 
     if surname not in text:

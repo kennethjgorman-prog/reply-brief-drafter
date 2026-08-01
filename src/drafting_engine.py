@@ -27,6 +27,213 @@ from src.utils.citation_validator import (
 from src.utils.transcript_parser import verify_attribution_framing
 
 
+# === DIRECT MODE — single API call, full docs as blocks, no guardrails ===
+# Bypasses the multi-pass pipeline and post-process guardrails. The drafter
+# attorney chose this mode explicitly via the Direct Mode checkbox.
+# Respondent briefs ARE sanitized before being sent (substantive accuracy
+# guardrail; prevents AI from mining opposing counsel's framing as record
+# facts). All other documents are sent raw and untruncated.
+
+_DIRECT_MODE_BRIEF_TYPE_LABEL = {
+    'appellant': "appellant's",
+    'respondent': "respondent's",
+    'reply': "reply",
+}
+
+_DIRECT_MODE_PARTY_ROLE = {
+    'appellant': 'appellant',
+    'respondent': 'respondent',
+    'reply': 'appellant filing a reply',
+}
+
+
+# === Direct Mode noise stripping ===
+# Strip non-substantive content (parenthesized transcript line numbers,
+# NYSCEF stamps, court reporter footers, INDEX NO headers, lone page-number
+# lines) BEFORE docs enter Direct Mode document blocks. Saves tokens in 1M
+# context calls. Multi-pass paths are unaffected.
+_DIRECT_MODE_NOISE_PATTERNS = [
+    re.compile(r'^\s*\(\s*\d{1,3}\s*\)\s+', re.MULTILINE),         # (NN)-prefixed line numbers
+    re.compile(r'^FILED:.*$', re.MULTILINE),                       # NYSCEF stamp
+    re.compile(r'^NYSCEF DOC.*$', re.MULTILINE),                   # NYSCEF doc
+    re.compile(r'^RECEIVED NYSCEF:.*$', re.MULTILINE),             # NYSCEF received
+    re.compile(r'.*\b(?:Lexitas|J\s*&\s*M\s*Reporting|Veritext)\b.*$', re.MULTILINE),  # reporter footers
+    re.compile(r'^INDEX NO\..*$', re.MULTILINE),                   # INDEX NO header
+    re.compile(r'^\s*\d+\s*$', re.MULTILINE),                      # lone page-number lines
+    re.compile(r'\b(?:JA|RA|R|BATES)[-_]?\d{3,8}\b', re.IGNORECASE),                   # inline Bates IDs
+    re.compile(r'^Page\s+\d+\s+of\s+\d+\s*$', re.MULTILINE),                           # "Page X of Y" headers
+    re.compile(r'-\s*\n\s*'),                                                          # OCR continuation hyphens
+    re.compile(r'^[\W_]+\s*$', re.MULTILINE),                                          # pure-punctuation lines
+    re.compile(r'^(?:CERTIFICATE OF|I,\s+\w+,\s+a Notary|sworn to before me).*$',
+               re.MULTILINE | re.IGNORECASE),                                          # notary/certificate boilerplate
+]
+_DIRECT_MODE_MULTI_BLANK_RE = re.compile(r'\n{3,}')
+
+
+def _strip_direct_mode_noise(text: str) -> str:
+    """Remove non-substantive token-burning content from a document before
+    sending it into Direct Mode. Multi-pass paths are unaffected."""
+    if not text:
+        return text
+    for rx in _DIRECT_MODE_NOISE_PATTERNS:
+        text = rx.sub('', text)
+    text = _DIRECT_MODE_MULTI_BLANK_RE.sub('\n\n', text)
+    return text
+
+
+def _build_direct_mode_doc_blocks(docs, case_law_issues=None):
+    """Collect all docs as Anthropic Citations API document blocks. Flat dict
+    iteration catches every category (decisions, briefs, records, research,
+    additional). Respondent briefs are routed through _gather_respondent_briefs
+    with sanitize=True to strip record cites and quoted testimony — substantive
+    accuracy guardrail, not noise reduction. All other docs sent raw and
+    untruncated. Returns list of {'text', 'title'} dicts ordered as an
+    attorney would read them."""
+    case_law_issues = case_law_issues or {}
+
+    def _key_priority(key):
+        if key == 'lower_court_decision': return 0
+        if key in ('appellant_brief', 'opening_brief'): return 1
+        # respondent briefs land at priority 2 via the sanitized helper
+        if key == 'existing_draft': return 3
+        if key == 'trial_transcript': return 4
+        if key == 'record' or key.startswith('record_vol_'): return 5
+        if key == 'legal_research' or key.startswith('legal_research_'): return 6
+        if key in ('memo_of_law', 'reply_affirmation'): return 7
+        return 8
+
+    def _key_label(key, doc):
+        filename = doc.get('filename') or ''
+        if key.startswith('record_vol_'):
+            n = key.replace('record_vol_', '')
+            return f"Record Volume {n}" + (f" ({filename})" if filename else "")
+        if key == 'record':
+            return "Record" + (f" ({filename})" if filename else "")
+        if key.startswith('legal_research_') or key == 'legal_research':
+            issue = case_law_issues.get(key, '')
+            base = filename or key.replace('_', ' ').title()
+            return f"{base}" + (f" [Issue: {issue}]" if issue else "")
+        nice = key.replace('_', ' ').title()
+        return f"{nice}" + (f" ({filename})" if filename else "")
+
+    entries = []
+    for key, doc in (docs or {}).items():
+        if not isinstance(doc, dict):
+            continue
+        if key.startswith('respondent_brief'):
+            continue  # handled separately via sanitized helper below
+        text = doc.get('text', '')
+        if not text or not text.strip():
+            continue
+        entries.append((_key_priority(key), _key_label(key, doc), _strip_direct_mode_noise(text)))
+
+    # Respondent briefs: sanitize before sending (prevents AI from mining
+    # opposing counsel's characterizations as if they were record facts).
+    for label, text, _priority in _gather_respondent_briefs(docs, sanitize=True):
+        if text and text.strip():
+            entries.append((2, label, _strip_direct_mode_noise(text)))
+
+    entries.sort(key=lambda e: (e[0], e[1]))
+    return [{'text': text, 'title': title} for (_p, title, text) in entries]
+
+
+def _direct_mode_draft(project, docs, brief_type, drafting_instructions='', model='sonnet'):
+    """Direct Mode: one paragraph (system) + full documents (user) in a single
+    Sonnet call. No truncation, no guardrails, no post-processing. Respondent
+    briefs ARE sanitized via _gather_respondent_briefs(sanitize=True). Returns
+    (brief_text, {}) for caller compatibility with the multi-pass functions."""
+    case_name = project.get('case_name', '')
+    court = project.get('court', '')
+    docket_number = project.get('docket_number', '')
+    party_role = _DIRECT_MODE_PARTY_ROLE.get(brief_type, 'party')
+    brief_type_label = _DIRECT_MODE_BRIEF_TYPE_LABEL.get(brief_type, brief_type)
+    case_law_issues = project.get('case_law_issues', {})
+
+    instructions_text = drafting_instructions.strip() if drafting_instructions else "No additional instructions."
+
+    system_prompt = (
+        f"You are an experienced appellate attorney. Draft a {brief_type_label} "
+        f"brief in {case_name}, {court}, docket {docket_number}, on behalf of "
+        f"the {party_role}. The full record, lower court decision, opposing "
+        f"brief (if applicable), and case-law research are provided as document "
+        f"blocks.\n\n"
+        f"CITATION REQUIREMENT — NON-NEGOTIABLE:\n"
+        f"Every sentence stating a fact, an assertion about what a witness "
+        f"testified, what a court ruled, what a document says, or what "
+        f"happened in the record MUST end with an inline parenthetical record "
+        f"citation in bare-page form: (347) or (812-815) or (347, 351). "
+        f"Aim for 1-3 cites per paragraph. A sentence without a cite is "
+        f"acceptable ONLY when it is a transitional sentence, an argument "
+        f"heading, or an introductory clause that contains no factual "
+        f"assertion. A draft with sparse citations is UNFILEABLE — assume "
+        f"the attorney will reject any draft below 1 cite per 60 words. If "
+        f"you cannot find support for a factual statement in the provided "
+        f"documents, omit the statement entirely. Do not write [CITE NEEDED] "
+        f"or any placeholder.\n\n"
+        f"CASE LAW: cite under New York convention — AD2d, AD3d, NY2d (no "
+        f"periods), bracketed court/year [1st Dept. 2002], underline case "
+        f"names with _underscores_.\n\n"
+        f"VOICE: experienced attorney, no markdown, no bullet points, no AI "
+        f"tells, no preamble, output the brief itself.\n\n"
+        f"Attorney instructions: {instructions_text}"
+    )
+
+    user_message = (
+        f"Draft the complete {brief_type_label} brief for this case based on "
+        f"the documents provided. Include all standard sections appropriate "
+        f"for this brief type. Output the full brief text only — no preamble, "
+        f"no commentary."
+    )
+
+    document_blocks = _build_direct_mode_doc_blocks(docs, case_law_issues)
+    if not document_blocks:
+        return ("ERROR: Direct Mode requires at least one uploaded document with text.", {})
+
+    total_chars = sum(len(b['text']) for b in document_blocks)
+    print(f"[DIRECT MODE] {len(document_blocks)} docs, brief_type={brief_type}, "
+          f"model={model}, total_chars={total_chars:,}", flush=True)
+
+    # Direct Mode calls the Anthropic SDK inline — no thinking budget, no
+    # max_tokens inflation. Pure single-shot drafting. The shared
+    # call_claude_with_docs forces thinking which blows the context window
+    # on full-record direct mode runs.
+    import os
+    from anthropic import Anthropic
+    from src.claude_client import MODELS
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        return ("ERROR: ANTHROPIC_API_KEY not set.", {})
+    # 1M context default for Direct Mode — needed for full appellate records
+    client = Anthropic(api_key=api_key, default_headers={"anthropic-beta": "context-1m-2025-08-07"})
+    model_id = MODELS.get(model, MODELS['sonnet'])
+
+    content = []
+    for block in document_blocks:
+        content.append({
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": block["text"]},
+            "title": block["title"],
+            "citations": {"enabled": True},
+        })
+    content.append({"type": "text", "text": user_message})
+
+    try:
+        with client.messages.stream(
+            model=model_id,
+            max_tokens=12000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": content}],
+        ) as stream:
+            message = stream.get_final_message()
+        text_parts = []
+        for blk in message.content:
+            if blk.type == "text":
+                text_parts.append(blk.text)
+        return ("".join(text_parts), {})
+    except Exception as e:
+        return (f"ERROR: Direct Mode API call failed: {e}", {})
+
+
 def _draft_appellant_brief_structured(project, docs, structure, drafting_instructions='', model='sonnet'):
     """Structured drafting for appellant's brief — skips extraction passes"""
     decision_text = _truncate(docs.get('lower_court_decision', {}).get('text', ''), MAX_PRIMARY_CHARS)
@@ -408,7 +615,9 @@ Respondent: {project.get('respondent', '')}
     return final_brief, {'drafting_mode': 'structured', 'qc_report': qc_report, 'citation_report': cite_report}
 
 
-def _draft_appellant_brief(project, docs, drafting_instructions='', model='sonnet'):
+def _draft_appellant_brief(project, docs, drafting_instructions='', model='sonnet', direct_mode=False):
+    if direct_mode:
+        return _direct_mode_draft(project, docs, 'appellant', drafting_instructions, model)
     """4-pass drafting for appellant's brief"""
     structure = project.get('brief_structure')
     if structure and structure.get('points'):
@@ -603,7 +812,9 @@ Respondent: {project.get('respondent', '')}
     }
 
 
-def _draft_respondent_brief(project, docs, drafting_instructions='', model='sonnet'):
+def _draft_respondent_brief(project, docs, drafting_instructions='', model='sonnet', direct_mode=False):
+    if direct_mode:
+        return _direct_mode_draft(project, docs, 'respondent', drafting_instructions, model)
     """4-pass drafting for respondent's brief"""
     structure = project.get('brief_structure')
     if structure and structure.get('points'):
@@ -829,7 +1040,9 @@ WARNING: This is the opposing party's ARGUMENT. It is NOT a factual source.
     }
 
 
-def _draft_reply_brief(project, docs, drafting_instructions='', model='sonnet'):
+def _draft_reply_brief(project, docs, drafting_instructions='', model='sonnet', direct_mode=False):
+    if direct_mode:
+        return _direct_mode_draft(project, docs, 'reply', drafting_instructions, model)
     """5-pass drafting for reply brief — existing logic preserved"""
     structure = project.get('brief_structure')
     if structure and structure.get('points'):

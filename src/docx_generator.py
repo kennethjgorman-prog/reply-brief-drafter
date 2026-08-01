@@ -244,6 +244,11 @@ def generate_brief_docx(project):
     # Create Word document
     doc = DocxDocument()
 
+    # Clear python-docx default metadata
+    doc.core_properties.author = "Kenneth J. Gorman"
+    doc.core_properties.comments = ''
+    doc.core_properties.last_modified_by = "Kenneth J. Gorman"
+
     # Set 1-inch margins on all sides
     for section in doc.sections:
         section.top_margin = Inches(1)
@@ -613,6 +618,8 @@ def generate_section_docx(project, section_key):
     nyscef_cfg = project.get('nyscef_config')
 
     doc = DocxDocument()
+    doc.core_properties.author = "Kenneth J. Gorman"
+    doc.core_properties.last_modified_by = "Kenneth J. Gorman"
     style = doc.styles['Normal']
     style.font.name = 'Courier New'
     style.font.size = Pt(12)

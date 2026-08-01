@@ -505,6 +505,7 @@ STRING CITATION STYLE:
 - Signal hierarchy: see \u2192 see also \u2192 see generally \u2192 cf. \u2192 accord \u2192 citing
 - Include parenthetical descriptions for key cases, bare cites for supporting weight
 - NY state format: [2d Dept. 2011]; Federal format: (2d Cir. 2013)
+- DEPARTMENT ABBREVIATION IS MANDATORY: Always write "1st Dept", "2d Dept", "3d Dept", "4th Dept" — NEVER spell out "First Department", "Second Department", "Third Department", or "Fourth Department" in citations. This is non-negotiable. Bluebook and NY citation rules require the abbreviation.
 
 ANTI-PATTERNS \u2014 NEVER DO THESE:
 - NEVER use em dashes (\u2014). Use commas instead. Hyphens in compound words are fine.

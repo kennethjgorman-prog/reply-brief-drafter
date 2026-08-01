@@ -556,6 +556,9 @@
             <div style="text-align: right; color: #888; font-size: 0.9em;">
                 <div>{{ project.court }}</div>
                 <div>Docket: {{ project.docket_number }}</div>
+                {% if project.brief_type != 'reply' %}
+                <button onclick="forkReplyBrief()" style="margin-top: 8px; padding: 6px 16px; border-radius: 6px; border: 1px solid rgba(255,165,0,0.4); background: rgba(255,165,0,0.1); color: #ffa500; font-size: 0.85em; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(255,165,0,0.2)'; this.style.borderColor='rgba(255,165,0,0.7)';" onmouseout="this.style.background='rgba(255,165,0,0.1)'; this.style.borderColor='rgba(255,165,0,0.4)';">Create Reply Brief &rarr;</button>
+                {% endif %}
             </div>
         </div>
 
@@ -716,6 +719,12 @@
                             <option value="opus">Opus 4.6 (best quality)</option>
                         </select>
                     </div>
+                    <div style="margin-bottom: 12px; padding: 10px; background: rgba(247, 197, 84, 0.12); border: 1px solid rgba(247, 197, 84, 0.4); border-radius: 6px;">
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: #fff;">
+                            <input type="checkbox" id="directModeChk" style="cursor: pointer;">
+                            <span><strong>Direct Mode</strong> (sends full documents to Sonnet 4.6 in a single call, bypasses guardrails)</span>
+                        </label>
+                    </div>
                     <button class="btn btn-primary" onclick="draftEntireBrief()" style="margin-bottom: 15px;">
                         {{ config.draft_button }}
                     </button>
@@ -803,6 +812,26 @@
         const projectId = "{{ project.id }}";
         const briefType = "{{ project.brief_type }}";
         let pointCounter = 0;
+
+        async function forkReplyBrief() {
+            if (!confirm('Create a Reply Brief project from this case? All documents and case info will be copied.')) return;
+            try {
+                const response = await fetch(`/project/${projectId}/fork-reply`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+                if (data.project_id) {
+                    window.location.href = '/project/' + data.project_id;
+                }
+            } catch (err) {
+                alert('Error creating reply brief: ' + err.message);
+            }
+        }
 
         // === Supplement Eligible Docs (transcript summaries) ===
         const supplementEligibleDocs = [];
@@ -2049,7 +2078,11 @@
                 const response = await fetch(`/project/${projectId}/draft-all`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ drafting_instructions: instructions, model: document.getElementById('modelSelect').value })
+                    body: JSON.stringify({
+                        drafting_instructions: instructions,
+                        model: document.getElementById('modelSelect').value,
+                        direct_mode: document.getElementById('directModeChk').checked
+                    })
                 });
 
                 const data = await response.json();

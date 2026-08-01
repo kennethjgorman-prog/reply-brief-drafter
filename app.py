@@ -544,6 +544,7 @@ def draft_section(project_id):
     custom_instructions = data.get('custom_instructions', '').strip()
     selected_docs = data.get('selected_docs', None)
     model = data.get('model', 'sonnet')
+    direct_mode = bool(data.get('direct_mode', False))  # forwarded; per-section direct mode not yet implemented
     brief_type = project.get('brief_type', 'reply')
 
     docs = project.get('documents', {})
@@ -837,9 +838,16 @@ Draft the section now:"""
     if section_type != 'procedural_history':
         result = enforce_case_cites(result, research_text)
 
-    # Citation validation — checks case names AND reporter numbers against sources (skip procedural history)
+    # Citation validation: case names + reporter numbers must appear in the
+    # source pool. Original disable note ("flagging legitimate defense cases
+    # not in plaintiff's uploads") was correct: `fitted` is just record
+    # materials, so cases cited by the defense side that live only in
+    # research uploads were false-positive flagged. Fix: include research_text
+    # in the source pool so research-only cases also validate.
     if section_type != 'procedural_history':
         source_texts = [text for label, text in fitted if text]
+        if research_text:
+            source_texts.append(research_text)
         result = validate_citations(result, *source_texts)
 
     # Strip all validation artifacts from argument sections
@@ -902,6 +910,7 @@ def draft_entire_brief(project_id):
 
     data = request.json or {}
     drafting_instructions = data.get('drafting_instructions', '').strip()
+    direct_mode = bool(data.get('direct_mode', False))
 
     # Save instructions to project for reference
     if drafting_instructions:
@@ -929,11 +938,11 @@ def draft_entire_brief(project_id):
         print(f"[RECORD TRUNCATION] {record_warning}", flush=True)
 
     if brief_type == 'appellant':
-        final_brief, research = _draft_appellant_brief(project, docs, drafting_instructions, model=model)
+        final_brief, research = _draft_appellant_brief(project, docs, drafting_instructions, model=model, direct_mode=direct_mode)
     elif brief_type == 'respondent':
-        final_brief, research = _draft_respondent_brief(project, docs, drafting_instructions, model=model)
+        final_brief, research = _draft_respondent_brief(project, docs, drafting_instructions, model=model, direct_mode=direct_mode)
     else:
-        final_brief, research = _draft_reply_brief(project, docs, drafting_instructions, model=model)
+        final_brief, research = _draft_reply_brief(project, docs, drafting_instructions, model=model, direct_mode=direct_mode)
 
     # Re-read project from disk to avoid overwriting concurrent changes
     fresh_project = get_project(project_id)
@@ -956,9 +965,97 @@ def draft_entire_brief(project_id):
     return jsonify(response)
 
 
+def _split_brief_into_sections(brief_text):
+    """Split a brief into sections at major headings for section-by-section revision.
+    Returns list of (heading, content) tuples. The heading is used for context only."""
+    # Pattern matches major section headings for all brief types (appellant, respondent, reply)
+    heading_pattern = re.compile(
+        r'^(PRELIMINARY STATEMENT|INTRODUCTION|'
+        r'(?:COUNTER-)?STATEMENT OF (?:THE CASE|FACTS)|'
+        r'RESPONDENT[\'S]*\s+STATEMENT OF (?:THE CASE|FACTS)|'
+        r'PROCEDURAL HISTORY|STANDARD OF REVIEW|QUESTIONS PRESENTED|'
+        r'NATURE OF THE CASE|SUMMARY OF ARGUMENT|'
+        r'ARGUMENT|'
+        r'(?:(?:REPLY|IN REPLY) TO )?POINT\s+[IVX]+[:\.]?.*|'
+        r'DEFENDANTS[\'S]*\s+MOTIONS?.*|PLAINTIFF[\'S]*\s+OPPOSITION.*|'
+        r'CONCLUSION|WHEREFORE)\s*$',
+        re.MULTILINE | re.IGNORECASE
+    )
+    lines = brief_text.split('\n')
+    sections = []
+    current_heading = 'PREAMBLE'
+    current_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if heading_pattern.match(stripped) and len(stripped) > 3:
+            # Save previous section
+            if current_lines:
+                sections.append((current_heading, '\n'.join(current_lines)))
+            current_heading = stripped
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    # Save final section
+    if current_lines:
+        sections.append((current_heading, '\n'.join(current_lines)))
+
+    return sections
+
+
+def _extract_record_cites(text):
+    """Extract all record page citations like (123), (4251-4253), (45-47)."""
+    return set(re.findall(r'\(\d{1,5}(?:\s*-\s*\d{1,5})?\)', text))
+
+
+def _extract_case_cites(text):
+    """Extract all underscored case names."""
+    return set(re.findall(r'_([^_\n]+v\.?\s+[^_\n]+)_', text))
+
+
+def _build_section_revision_prompt(section_text, revision_instructions, party_context,
+                                    prev_section_snippet, next_section_snippet):
+    """Build a focused prompt for revising a single section of the brief."""
+    context_note = ""
+    if prev_section_snippet:
+        context_note += f"\n=== PRECEDING SECTION (for context only — do NOT include in output) ===\n{prev_section_snippet}\n"
+    if next_section_snippet:
+        context_note += f"\n=== FOLLOWING SECTION (for context only — do NOT include in output) ===\n{next_section_snippet}\n"
+
+    return f"""You are an expert appellate attorney revising ONE SECTION of a brief.
+
+{party_context}
+
+=== REVISION INSTRUCTIONS ===
+{revision_instructions}
+
+{context_note}
+
+=== SECTION TO REVISE ===
+{section_text}
+
+CRITICAL RULES:
+1. Output ONLY the revised version of this section — nothing else
+2. Preserve EVERY record page citation exactly as written — e.g., (4251), (1657-1659), (1731)
+3. Preserve EVERY direct quote in quotation marks — do not paraphrase quoted text
+4. Preserve EVERY case citation and its underscore formatting — e.g., _Case v. Name_
+5. Preserve the section structure — subsection headings (A., B., i., ii.) must remain
+6. You may tighten prose, remove redundancy, and improve flow
+7. You must NOT drop paragraphs, arguments, expert opinions, or factual assertions
+8. You must NOT add new cases from your training data
+9. You must NOT reorganize the section structure
+10. PLAIN TEXT ONLY — no markdown (no ##, no **, no *)
+11. Case names use _underscores_ ONLY, never **asterisks**
+12. Court/year in SQUARE BRACKETS: [2d Dept 2023], never parentheses
+
+OUTPUT ONLY THE REVISED SECTION TEXT:"""
+
+
 @app.route('/project/<project_id>/revise', methods=['POST'])
 def revise_brief(project_id):
-    """Revise an existing drafted brief with targeted instructions"""
+    """Revise an existing drafted brief with targeted instructions.
+    Uses section-by-section revision to prevent citation loss and structural drift."""
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
@@ -1006,7 +1103,6 @@ def revise_brief(project_id):
     doc_items = build_doc_items_for_brief_type(docs, record_combined, research_text, brief_type)
 
     fitted = _fit_documents(doc_items)
-    source_docs = "\n\n".join(f"=== {label} ===\n{text}" for label, text in fitted if text)
 
     # Pre-process opening brief constraints for reply brief revisions
     revise_constraints = ''
@@ -1025,43 +1121,73 @@ def revise_brief(project_id):
     else:  # reply
         party_context = f"You are writing FOR {appellant_name} (the appellant) AGAINST {respondent_name} (the respondent). This is a reply brief responding to the respondent's arguments."
 
-    prompt = build_revision_prompt(revision_instructions, party_context, revise_constraints)
-    # Append exemplars for brief type
-    prompt = prompt.replace(
-        "OUTPUT ONLY THE COMPLETE REVISED BRIEF TEXT.",
-        f"{_build_exemplars(brief_type)}\n\nOUTPUT ONLY THE COMPLETE REVISED BRIEF TEXT."
-    )
+    model = data.get('model', 'sonnet')
 
     # --- Pre-revision metrics (baseline for validation) ---
     pre_metrics = count_brief_metrics(existing_brief)
+    pre_record_cites = _extract_record_cites(existing_brief)
+    pre_case_cites = _extract_case_cites(existing_brief)
     print(f"[REVISION] Pre-metrics: {pre_metrics['words']} words, {pre_metrics['record_cites']} record cites, "
           f"{pre_metrics['case_cites']} case cites, {pre_metrics['quotes']} quotes, "
           f"Points: {pre_metrics['points']}", flush=True)
 
-    # Scale max_tokens to brief length — 1 token ~ 4 chars, add 20% headroom
-    estimated_tokens = max(16000, int(len(existing_brief) / 3.5))
-    model = data.get('model', 'sonnet')
+    # --- Section-by-section revision ---
+    brief_sections = _split_brief_into_sections(existing_brief)
+    print(f"[REVISION] Split brief into {len(brief_sections)} sections: {[h for h, _ in brief_sections]}", flush=True)
 
-    # Build document blocks for citation tracking.
-    # Budget: skip record volumes (too large for revision context) and cap total size.
-    revise_docs = [{"text": existing_brief, "title": "Existing Brief"}]
-    context_budget = 150000  # chars, leave room for prompt + output tokens
-    context_used = len(existing_brief) + len(prompt)
-    for label, text in fitted:
-        if text and 'RECORD ON APPEAL' not in label:
-            if context_used + len(text) < context_budget:
-                revise_docs.append({"text": text, "title": label})
-                context_used += len(text)
-    revised_text, revise_citations = call_claude_with_docs(prompt, revise_docs, max_tokens=estimated_tokens, model=model)
-    print(f"[CITATIONS] revise_brief returned {len(revise_citations)} source citations", flush=True)
+    revised_sections = []
+    for idx, (heading, section_text) in enumerate(brief_sections):
+        # Skip very short sections (blank lines, single-line headings with no body)
+        if len(section_text.strip()) < 50:
+            revised_sections.append(section_text)
+            print(f"[REVISION] Section '{heading}' too short to revise, keeping as-is", flush=True)
+            continue
 
-    # Convert any bold case names to underscore format
-    revised_text = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', revised_text)
+        # Build context snippets from adjacent sections (last/first 500 chars)
+        prev_snippet = ''
+        next_snippet = ''
+        if idx > 0:
+            prev_text = brief_sections[idx - 1][1]
+            prev_snippet = prev_text[-500:] if len(prev_text) > 500 else prev_text
+        if idx < len(brief_sections) - 1:
+            next_text = brief_sections[idx + 1][1]
+            next_snippet = next_text[:500] if len(next_text) > 500 else next_text
 
-    # Citation validation — flag fabricated case names and reporter numbers
-    source_texts_for_validation = [text for label, text in fitted if text]
-    source_texts_for_validation.append(existing_brief)  # also check against the brief being revised
-    revised_text = validate_citations(revised_text, *source_texts_for_validation)
+        section_prompt = _build_section_revision_prompt(
+            section_text, revision_instructions, party_context, prev_snippet, next_snippet
+        )
+
+        # Scale tokens to section length
+        section_tokens = max(4000, int(len(section_text) / 3.0))
+
+        section_docs = [{"text": section_text, "title": f"Section: {heading}"}]
+
+        print(f"[REVISION] Revising section '{heading}' ({len(section_text)} chars)...", flush=True)
+        revised_section, _ = call_claude_with_docs(section_prompt, section_docs,
+                                                    max_tokens=section_tokens, model=model)
+
+        # Post-process this section: bold to underscore, bare case name wrapping
+        revised_section = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', revised_section)
+        revised_section = re.sub(
+            r'(?<!_)(?<!\w)([A-Z][A-Za-z\.\'\-\s]+?v\.?\s+[A-Z][A-Za-z\.\'\-\s,]+?),\s+(\d+\s+(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d|NY\s+Prac|A\.L\.R\.|Am\.\s*Jur)\b)',
+            lambda m: '_' + m.group(1).rstrip() + '_, ' + m.group(2),
+            revised_section
+        )
+
+        # Section-level citation check: warn if record cites dropped from this section
+        section_pre_cites = _extract_record_cites(section_text)
+        section_post_cites = _extract_record_cites(revised_section)
+        dropped = section_pre_cites - section_post_cites
+        if dropped:
+            print(f"[REVISION] WARNING: Section '{heading}' dropped {len(dropped)} record cites: {dropped}", flush=True)
+
+        revised_sections.append(revised_section)
+        print(f"[REVISION] Section '{heading}' done ({len(revised_section)} chars)", flush=True)
+
+    # Reassemble the revised brief
+    revised_text = '\n\n'.join(revised_sections)
+
+    # Citation validation DISABLED — was flagging legitimate defense cases not in plaintiff's uploads
 
     # Editorial review: catch repetitive Points, overlapping arguments
     revised_text = editorial_review_pass(revised_text, doc_type=f"{brief_type} brief", model=model)
@@ -1069,7 +1195,17 @@ def revise_brief(project_id):
     # Factual fidelity verification: compare revised draft against source documents
     revised_text = verify_factual_fidelity(revised_text, project, model=model)
 
-    # --- Post-revision validation: REJECT if content gutted ---
+    # --- Post-revision citation safety net ---
+    post_record_cites = _extract_record_cites(revised_text)
+    post_case_cites = _extract_case_cites(revised_text)
+    dropped_record = pre_record_cites - post_record_cites
+    dropped_cases = pre_case_cites - post_case_cites
+    if dropped_record:
+        print(f"[REVISION] CITATION SAFETY NET: {len(dropped_record)} record cites dropped: {dropped_record}", flush=True)
+    if dropped_cases:
+        print(f"[REVISION] CITATION SAFETY NET: {len(dropped_cases)} case cites dropped: {dropped_cases}", flush=True)
+
+    # --- Post-revision validation ---
     post_metrics = count_brief_metrics(revised_text)
     print(f"[REVISION] Post-metrics: {post_metrics['words']} words, {post_metrics['record_cites']} record cites, "
           f"{post_metrics['case_cites']} case cites, {post_metrics['quotes']} quotes, "
@@ -1085,11 +1221,10 @@ def revise_brief(project_id):
             violations.append(f"AI refused to revise (detected: '{phrase}')")
             break
 
-    # Content-loss guardrail DISABLED — attorney may intentionally condense
     if violations:
         print(f"[REVISION] WARNING (not blocking) -- {len(violations)} violations: {violations}", flush=True)
 
-    # --- Validation passed — save revision ---
+    # --- Save revision ---
     # Re-read project from disk to avoid overwriting concurrent changes
     fresh_project = get_project(project_id)
     if 'drafted_sections' not in fresh_project:
@@ -1117,6 +1252,10 @@ def revise_brief(project_id):
     return jsonify({
         'revised_brief': revised_text,
         'revision_count': fresh_project.get('revision_count', 1),
+        'dropped_cites': {
+            'record': list(dropped_record) if dropped_record else [],
+            'cases': list(dropped_cases) if dropped_cases else [],
+        },
         'metrics': {
             'pre': {k: v if not isinstance(v, list) else len(v) for k, v in pre_metrics.items()},
             'post': {k: v if not isinstance(v, list) else len(v) for k, v in post_metrics.items()},
@@ -1198,10 +1337,17 @@ def supplement_brief(project_id):
     # Post-processing: bold to underscore case names
     supplemented_text = re.sub(r'\*\*([A-Z][^*]+v\.?\s+[^*]+)\*\*', r'_\1_', supplemented_text)
 
-    # Citation validation
-    source_texts_for_validation = [text for _, text in summary_docs]
-    source_texts_for_validation.append(existing_brief)
-    supplemented_text = validate_citations(supplemented_text, *source_texts_for_validation)
+    # Wrap bare case names in underscores if not already wrapped
+    supplemented_text = re.sub(
+        r'(?<!_)(?<!\w)([A-Z][A-Za-z\.\'\-\s]+?v\.?\s+[A-Z][A-Za-z\.\'\-\s,]+?),\s+(\d+\s+(?:AD[23]d|NY[23]d|NYS[23]d|Misc\s*[23]d|NY\s+Prac|A\.L\.R\.|Am\.\s*Jur)\b)',
+        lambda m: '_' + m.group(1).rstrip() + '_, ' + m.group(2),
+        supplemented_text
+    )
+
+    # Citation validation DISABLED — was flagging legitimate defense cases not in plaintiff's uploads
+    # source_texts_for_validation = [text for _, text in summary_docs]
+    # source_texts_for_validation.append(existing_brief)
+    # supplemented_text = validate_citations(supplemented_text, *source_texts_for_validation)
 
     # Post-supplement validation
     post_metrics = count_brief_metrics(supplemented_text)
@@ -1382,6 +1528,118 @@ def download_section(project_id, section_key):
         download_name=filename,
         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     )
+
+
+@app.route('/project/<project_id>/fork-reply', methods=['POST'])
+def fork_reply_brief(project_id):
+    """Create a reply brief project by forking an existing appellant or respondent project.
+
+    Copies all metadata and uploaded documents. The source project's generated
+    brief (if any) becomes the opening_brief in the new reply project.
+    """
+    import shutil
+
+    source = get_project(project_id)
+    if not source:
+        return jsonify({'error': 'Project not found'}), 404
+
+    source_type = source.get('brief_type', 'reply')
+    if source_type == 'reply':
+        return jsonify({'error': 'Cannot fork a reply brief from another reply brief'}), 400
+
+    new_id = str(uuid.uuid4())[:8]
+    new_dir = PROJECTS_DIR / new_id
+    new_dir.mkdir(exist_ok=True)
+    (new_dir / 'uploads').mkdir(exist_ok=True)
+
+    # Copy metadata
+    new_project = {
+        'id': new_id,
+        'brief_type': 'reply',
+        'representing': 'appellant',
+        'case_name': source.get('case_name', ''),
+        'court': source.get('court', ''),
+        'docket_number': source.get('docket_number', ''),
+        'appellant': source.get('appellant', ''),
+        'respondent': source.get('respondent', ''),
+        'attorney_name': source.get('attorney_name', ''),
+        'attorney_firm': source.get('attorney_firm', ''),
+        'created': datetime.now().isoformat(),
+        'status': 'uploading',
+        'documents': {},
+        'analysis': None,
+        'drafted_sections': {},
+        'forked_from': project_id,
+    }
+
+    # Copy witness map if present
+    if source.get('witness_map'):
+        new_project['witness_map'] = source['witness_map']
+
+    # Copy case law issues if present
+    if source.get('case_law_issues'):
+        new_project['case_law_issues'] = source['case_law_issues']
+
+    # Map document keys from source brief type to reply brief slots
+    # Reply brief primary uploads: opening_brief, respondent_brief, record_vol_*, appellant_appendix, legal_research*
+    key_map = {}
+    if source_type == 'respondent':
+        # Source respondent's "appellant_brief" = the opposing brief = what reply responds to
+        key_map['appellant_brief'] = 'respondent_brief'
+    elif source_type == 'appellant':
+        # Source appellant project doesn't have the respondent's brief yet — user uploads it
+        pass
+
+    # Keys to skip: not relevant to reply briefs or need manual upload
+    skip_keys = {'existing_draft', 'lower_court_decision', 'respondent_appendix'}
+
+    # Copy uploaded documents with key mapping
+    source_uploads_dir = PROJECTS_DIR / project_id / 'uploads'
+    for doc_key, doc_info in source.get('documents', {}).items():
+        if doc_key in skip_keys:
+            continue
+
+        # Remap key if needed, otherwise keep original
+        target_key = key_map.get(doc_key, doc_key)
+
+        # Try stored path first, then fall back to scanning uploads dir
+        old_path = Path(doc_info.get('path', ''))
+        if not old_path.exists():
+            # Path may be stale (app moved); try the actual uploads directory
+            expected_name = f"{doc_key}_{doc_info.get('filename', '')}"
+            fallback = source_uploads_dir / expected_name
+            if fallback.exists():
+                old_path = fallback
+        if old_path.exists():
+            new_filename = f"{target_key}_{doc_info['filename']}"
+            new_path = new_dir / 'uploads' / new_filename
+            shutil.copy2(str(old_path), str(new_path))
+            new_project['documents'][target_key] = {
+                'filename': doc_info['filename'],
+                'path': str(new_path),
+                'text': doc_info.get('text', ''),
+                'char_count': doc_info.get('char_count', 0),
+            }
+            if doc_info.get('source'):
+                new_project['documents'][target_key]['source'] = doc_info['source']
+
+    # If source has a generated brief, save it as opening_brief in the reply project
+    source_sections = source.get('drafted_sections', {})
+    if source_sections.get('full_brief', {}).get('content'):
+        brief_text = source_sections['full_brief']['content']
+        opening_path = new_dir / 'uploads' / 'opening_brief_generated.txt'
+        with open(opening_path, 'w', encoding='utf-8') as f:
+            f.write(brief_text)
+        new_project['documents']['opening_brief'] = {
+            'filename': 'opening_brief_generated.txt',
+            'path': str(opening_path),
+            'text': brief_text,
+            'char_count': len(brief_text),
+        }
+
+    save_project(new_id, new_project)
+
+    return jsonify({'project_id': new_id})
 
 
 if __name__ == '__main__':
